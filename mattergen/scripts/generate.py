@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 import fire
+from pymatgen.core.structure import Structure
 
 from mattergen.common.data.types import TargetProperty
 from mattergen.common.utils.data_classes import PRETRAINED_MODEL_NAME, MatterGenCheckpointInfo
@@ -28,7 +29,7 @@ def main(
     diffusion_guidance_factor: float | None = None,
     strict_checkpoint_loading: bool = True,
     target_compositions: list[dict[str, int]] | None = None,
-):
+) -> list[Structure]:
     """
     Evaluate diffusion model against molecular metrics.
 
@@ -94,7 +95,7 @@ def main(
         ),
         target_compositions_dict=target_compositions,
     )
-    generator.generate(output_dir=Path(output_path))
+    return generator.generate(output_dir=Path(output_path))
 
 
 def _main():
