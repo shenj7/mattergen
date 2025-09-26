@@ -6,7 +6,7 @@ import os
 from dataclasses import asdict, dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import numpy as np
 from huggingface_hub import hf_hub_download
@@ -154,3 +154,13 @@ class MatterGenCheckpointInfo:
             raise ValueError(f"Unrecognized load_epoch {self.load_epoch}")
         ckpt = ckpts[ckpt_ix]
         return ckpt
+
+
+class ProgressCallback(Protocol):
+    def __call__(self, progress: float):
+        """Callback which can be used to report progress on long-running inference.
+        
+        Args:
+            progress: Float between 0 and 1.
+        """
+        pass
