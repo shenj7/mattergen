@@ -29,7 +29,6 @@ def process_cif_directory(cif_dir, dataset):
                     })
             except Exception as e:
                 print(f"Error with {fname}: {e}")
-        break
     return results
 
 if __name__ == "__main__":
@@ -46,6 +45,7 @@ if __name__ == "__main__":
             print(f"\nCIF: {cif_file}")
             print(f" Atomic Numbers: {entry['atomic_numbers']}")
             print(f" Bulk Modulus: {entry['matches']['ml_bulk_modulus']}")
+            print(f" Number of matches: {len(entry['matches'])}")
             #print(" Matches in dataset:")
             #print(entry["matches"])
 
