@@ -1,0 +1,7 @@
+export MODEL_NAME=ml_bulk_modulus
+
+for i in $(seq 40 40 400);
+do
+	export RESULTS_PATH="results/$MODEL_NAME/64batch/$i"  # Samples will be written to this directory, e.g., `results/dft_mag_density`
+	mattergen-evaluate --structures_path=$RESULTS_PATH --relax=True --structure_matcher='disordered' --save_as="$RESULTS_PATH/metrics.json"
+done

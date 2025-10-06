@@ -3,7 +3,7 @@ from ase.io import read
 from mattersim import MatterSim
 
 # Directory containing generated materials
-materials_dir = "results/chemical_system_energy_above_hull"   # change to your folder path
+materials_dir = "results/ml_bulk_modulus/large_batch_novelty"   # change to your folder path
 
 # Initialize MatterSim
 sim = MatterSim()

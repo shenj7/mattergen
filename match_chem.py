@@ -36,7 +36,7 @@ if __name__ == "__main__":
     dataset = load_dataset("OMatG/Alex-MP-20")
 
     # Point to your CIF directory
-    cif_directory = "./results/ml_bulk_modulus/generated_crystals_cif/"
+    cif_directory = "./results/ml_bulk_modulus/large_batch_novelty/generated_crystals_cif/"
 
     matched = process_cif_directory(cif_directory, dataset["train"])
 
