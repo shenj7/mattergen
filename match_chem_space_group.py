@@ -4,8 +4,12 @@ import zipfile
 import tempfile
 from datasets import load_dataset
 from collections import defaultdict
+from collections import Counter
 from ase.io import read
 from datasets import load_dataset
+from pymatgen.core import Structure
+from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+
 
 def extract_zip_to_temp(zip_path: str) -> str:
     """
@@ -35,11 +39,19 @@ def get_cif_directory(input_path: str) -> str:
 # --- Step 1: get atomic numbers directly from ASE Atoms ---
 def get_atomic_numbers_from_cif(file_path):
     atoms = read(file_path)
-    return sorted(atoms.get_atomic_numbers())  # already integers
+    return atoms.get_atomic_numbers()  # already integers
+
+def get_space_group_from_cif(file_path):
+    structure = Structure.from_file(file_path)
+    analyzer = SpacegroupAnalyzer(structure)
+    space_group_symbol = analyzer.get_space_group_symbol()
+    return space_group_symbol
+    
 
 # --- Step 2: search HF dataset for matching atomic_numbers ---
-def find_matches(dataset, target_composition):
-    return dataset.filter(lambda row: Counter(row["atomic_numbers"]) == Counter(target_composition))
+def find_matches(dataset, target_composition, space_group):
+    return dataset.filter(lambda row: Counter(row["atomic_numbers"]) == Counter(target_composition) and
+                                        row["space_group"] == space_group)
 
 # --- Step 3: process CIF folder against dataset ---
 def process_cif_directory(cif_dir, dataset):
@@ -50,10 +62,15 @@ def process_cif_directory(cif_dir, dataset):
             path = os.path.join(cif_dir, fname)
             try:
                 atom_list = get_atomic_numbers_from_cif(path)
-                matches = find_matches(dataset, atom_list)
+                space_group = get_space_group_from_cif(path)
+                print(atom_list)
+                print(space_group)
+                matches = find_matches(dataset, atom_list, space_group)
+                print(matches)
                 if len(matches) > 0:
                     results[fname].append({
                         "atomic_numbers": atom_list,
+                        "space_group": space_group,
                         "matches": matches
                         })
             except Exception as e:
@@ -78,6 +95,7 @@ if __name__ == "__main__":
         for entry in info:
             print(f"\nCIF: {cif_file}")
             print(f" Atomic Numbers: {entry['atomic_numbers']}")
+            print(f" Space Group: {entry['space_group']}")
             print(f" Bulk Modulus: {entry['matches']['ml_bulk_modulus']}")
             print(f" Number of matches: {len(entry['matches'])}")
             #print(" Matches in dataset:")
