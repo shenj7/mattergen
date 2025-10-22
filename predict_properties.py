@@ -6,6 +6,22 @@ from datasets import load_dataset
 from collections import defaultdict, Counter
 from ase.io import read
 from datasets import load_dataset
+import torch
+from loguru import logger
+from ase.build import bulk
+from ase.units import GPa
+from ase.io import read
+from mattersim.forcefield import MatterSimCalculator
+
+def predict_bulk(material_file):
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    si = read(material_file)
+    si.calc = MatterSimCalculator(device=device)
+    print(si.calc)
+    print(f"Energy (eV)                 = {si.get_potential_energy()}")
+    print(f"Stress[0][0] (GPa)          = {si.get_stress(voigt=False)[0][0] / GPa}")
 
 def extract_zip_to_temp(zip_path: str) -> str:
     """
@@ -37,10 +53,6 @@ def get_atomic_numbers_from_cif(file_path):
     atoms = read(file_path)
     return sorted(atoms.get_atomic_numbers())  # already integers
 
-# --- Step 2: search HF dataset for matching atomic_numbers ---
-def find_matches(dataset, target_composition):
-    return dataset.filter(lambda row: Counter(row["atomic_numbers"]) == Counter(target_composition))
-
 # --- Step 3: process CIF folder against dataset ---
 def process_cif_directory(cif_dir, dataset):
     results = defaultdict(list)
@@ -50,12 +62,11 @@ def process_cif_directory(cif_dir, dataset):
             path = os.path.join(cif_dir, fname)
             try:
                 atom_list = get_atomic_numbers_from_cif(path)
-                matches = find_matches(dataset, atom_list)
-                if len(matches) > 0:
-                    results[fname].append({
-                        "atomic_numbers": atom_list,
-                        "matches": matches
-                        })
+                bulk = predict_bulk(path)
+                results[fname].append({
+                    "atomic_numbers": atom_list,
+                    "bulk_modulus": bulk
+                    })
             except Exception as e:
                 print(f"Error with {fname}: {e}")
     return results
@@ -72,14 +83,13 @@ if __name__ == "__main__":
     # Point to your CIF directory
     cif_directory = get_cif_directory(input_path)
 
-    matched = process_cif_directory(cif_directory, dataset["train"])
+    bulks = process_cif_directory(cif_directory, dataset["train"])
 
-    for cif_file, info in matched.items():
+    for cif_file, info in bulks.items():
         for entry in info:
             print(f"\nCIF: {cif_file}")
             print(f" Atomic Numbers: {entry['atomic_numbers']}")
-            print(f" Bulk Modulus: {entry['matches']['ml_bulk_modulus']}")
-            print(f" Number of matches: {len(entry['matches'])}")
+            print(f" Predicted Bulk Modulus: {entry['bulk_modulus']}")
             #print(" Matches in dataset:")
             #print(entry["matches"])
 
