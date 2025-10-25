@@ -1,0 +1,71 @@
+Found 16 CIF(s). Starting…
+
+[1/16] Processing gen_0.cif → gen_0/
+[32m2025-10-25 20:03:34.871[0m | [1mINFO    [0m | [36mmattersim.forcefield.potential[0m:[36mfrom_checkpoint[0m:[36m877[0m - [1mLoading the pre-trained mattersim-v1.0.0-1M.pth model[0m
+    [1/7] V=82.6765 Å^3  E=-69.708778 eV
+    ERROR while processing gen_0: 'PhonopyAtoms' object has no attribute 'get_chemical_symbols'
+[2/16] Processing gen_1.cif → gen_1/
+[32m2025-10-25 20:03:41.027[0m | [1mINFO    [0m | [36mmattersim.forcefield.potential[0m:[36mfrom_checkpoint[0m:[36m877[0m - [1mLoading the pre-trained mattersim-v1.0.0-1M.pth model[0m
+    [1/7] V=82.9674 Å^3  E=-68.442192 eV
+    ERROR while processing gen_1: 'PhonopyAtoms' object has no attribute 'get_chemical_symbols'
+[3/16] Processing gen_10.cif → gen_10/
+[32m2025-10-25 20:03:41.389[0m | [1mINFO    [0m | [36mmattersim.forcefield.potential[0m:[36mfrom_checkpoint[0m:[36m877[0m - [1mLoading the pre-trained mattersim-v1.0.0-1M.pth model[0m
+    [1/7] V=218.0515 Å^3  E=-172.357910 eV
+    ERROR while processing gen_10: 'PhonopyAtoms' object has no attribute 'get_chemical_symbols'
+[4/16] Processing gen_11.cif → gen_11/
+[32m2025-10-25 20:03:43.196[0m | [1mINFO    [0m | [36mmattersim.forcefield.potential[0m:[36mfrom_checkpoint[0m:[36m877[0m - [1mLoading the pre-trained mattersim-v1.0.0-1M.pth model[0m
+    [1/7] V=40.3421 Å^3  E=-33.291496 eV
+    ERROR while processing gen_11: 'PhonopyAtoms' object has no attribute 'get_chemical_symbols'
+[5/16] Processing gen_12.cif → gen_12/
+[32m2025-10-25 20:03:43.954[0m | [1mINFO    [0m | [36mmattersim.forcefield.potential[0m:[36mfrom_checkpoint[0m:[36m877[0m - [1mLoading the pre-trained mattersim-v1.0.0-1M.pth model[0m
+    [1/7] V=53.8888 Å^3  E=-44.572620 eV
+    ERROR while processing gen_12: 'PhonopyAtoms' object has no attribute 'get_chemical_symbols'
+[6/16] Processing gen_13.cif → gen_13/
+[32m2025-10-25 20:03:44.881[0m | [1mINFO    [0m | [36mmattersim.forcefield.potential[0m:[36mfrom_checkpoint[0m:[36m877[0m - [1mLoading the pre-trained mattersim-v1.0.0-1M.pth model[0m
+    [1/7] V=40.8167 Å^3  E=-28.545574 eV
+    ERROR while processing gen_13: 'PhonopyAtoms' object has no attribute 'get_chemical_symbols'
+[7/16] Processing gen_14.cif → gen_14/
+[32m2025-10-25 20:03:45.090[0m | [1mINFO    [0m | [36mmattersim.forcefield.potential[0m:[36mfrom_checkpoint[0m:[36m877[0m - [1mLoading the pre-trained mattersim-v1.0.0-1M.pth model[0m
+    [1/7] V=139.6790 Å^3  E=-113.873856 eV
+    ERROR while processing gen_14: 'PhonopyAtoms' object has no attribute 'get_chemical_symbols'
+[8/16] Processing gen_15.cif → gen_15/
+[32m2025-10-25 20:03:45.393[0m | [1mINFO    [0m | [36mmattersim.forcefield.potential[0m:[36mfrom_checkpoint[0m:[36m877[0m - [1mLoading the pre-trained mattersim-v1.0.0-1M.pth model[0m
+    [1/7] V=139.4622 Å^3  E=-102.697212 eV
+    ERROR while processing gen_15: 'PhonopyAtoms' object has no attribute 'get_chemical_symbols'
+[9/16] Processing gen_2.cif → gen_2/
+[32m2025-10-25 20:03:45.683[0m | [1mINFO    [0m | [36mmattersim.forcefield.potential[0m:[36mfrom_checkpoint[0m:[36m877[0m - [1mLoading the pre-trained mattersim-v1.0.0-1M.pth model[0m
+    [1/7] V=216.1607 Å^3  E=-171.934769 eV
+    ERROR while processing gen_2: 'PhonopyAtoms' object has no attribute 'get_chemical_symbols'
+[10/16] Processing gen_3.cif → gen_3/
+[32m2025-10-25 20:03:46.005[0m | [1mINFO    [0m | [36mmattersim.forcefield.potential[0m:[36mfrom_checkpoint[0m:[36m877[0m - [1mLoading the pre-trained mattersim-v1.0.0-1M.pth model[0m
+    [1/7] V=110.2938 Å^3  E=-92.634705 eV
+    ERROR while processing gen_3: 'PhonopyAtoms' object has no attribute 'get_chemical_symbols'
+[11/16] Processing gen_4.cif → gen_4/
+[32m2025-10-25 20:03:46.259[0m | [1mINFO    [0m | [36mmattersim.forcefield.potential[0m:[36mfrom_checkpoint[0m:[36m877[0m - [1mLoading the pre-trained mattersim-v1.0.0-1M.pth model[0m
+    [1/7] V=81.2048 Å^3  E=-68.248604 eV
+    ERROR while processing gen_4: 'PhonopyAtoms' object has no attribute 'get_chemical_symbols'
+[12/16] Processing gen_5.cif → gen_5/
+[32m2025-10-25 20:03:46.490[0m | [1mINFO    [0m | [36mmattersim.forcefield.potential[0m:[36mfrom_checkpoint[0m:[36m877[0m - [1mLoading the pre-trained mattersim-v1.0.0-1M.pth model[0m
+    [1/7] V=163.7178 Å^3  E=-114.741257 eV
+    ERROR while processing gen_5: 'PhonopyAtoms' object has no attribute 'get_chemical_symbols'
+[13/16] Processing gen_6.cif → gen_6/
+[32m2025-10-25 20:03:46.800[0m | [1mINFO    [0m | [36mmattersim.forcefield.potential[0m:[36mfrom_checkpoint[0m:[36m877[0m - [1mLoading the pre-trained mattersim-v1.0.0-1M.pth model[0m
+    [1/7] V=137.3055 Å^3  E=-114.707214 eV
+    ERROR while processing gen_6: 'PhonopyAtoms' object has no attribute 'get_chemical_symbols'
+[14/16] Processing gen_7.cif → gen_7/
+[32m2025-10-25 20:03:47.063[0m | [1mINFO    [0m | [36mmattersim.forcefield.potential[0m:[36mfrom_checkpoint[0m:[36m877[0m - [1mLoading the pre-trained mattersim-v1.0.0-1M.pth model[0m
+    [1/7] V=54.3966 Å^3  E=-42.237011 eV
+    ERROR while processing gen_7: 'PhonopyAtoms' object has no attribute 'get_chemical_symbols'
+[15/16] Processing gen_8.cif → gen_8/
+[32m2025-10-25 20:03:47.250[0m | [1mINFO    [0m | [36mmattersim.forcefield.potential[0m:[36mfrom_checkpoint[0m:[36m877[0m - [1mLoading the pre-trained mattersim-v1.0.0-1M.pth model[0m
+    [1/7] V=81.0780 Å^3  E=-68.223930 eV
+    ERROR while processing gen_8: 'PhonopyAtoms' object has no attribute 'get_chemical_symbols'
+[16/16] Processing gen_9.cif → gen_9/
+[32m2025-10-25 20:03:47.506[0m | [1mINFO    [0m | [36mmattersim.forcefield.potential[0m:[36mfrom_checkpoint[0m:[36m877[0m - [1mLoading the pre-trained mattersim-v1.0.0-1M.pth model[0m
+    [1/7] V=109.4625 Å^3  E=-78.542603 eV
+    ERROR while processing gen_9: 'PhonopyAtoms' object has no attribute 'get_chemical_symbols'
+
+All done.
+Summary: xyx/results/ml_bulk_modulus400/qha_outputs/summary_bulk_modulus.csv
+Per-structure QHA outputs live in their respective folders.
+Tip: open *_/bulk_modulus-temperature.dat to see the full B_T(T) curve.

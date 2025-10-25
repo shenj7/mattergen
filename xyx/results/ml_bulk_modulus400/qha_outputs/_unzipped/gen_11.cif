@@ -1,0 +1,28 @@
+data_image0
+_chemical_formula_structural       Os3
+_chemical_formula_sum              "Os3"
+_cell_length_a       2.74530834638255
+_cell_length_b       2.743592105623119
+_cell_length_c       6.768631458282471
+_cell_angle_alpha    78.2720014773216
+_cell_angle_beta     78.2724382521079
+_cell_angle_gamma    59.99829918335157
+
+_space_group_name_H-M_alt    "P 1"
+_space_group_IT_number       1
+
+loop_
+  _space_group_symop_operation_xyz
+  'x, y, z'
+
+loop_
+  _atom_site_type_symbol
+  _atom_site_label
+  _atom_site_symmetry_multiplicity
+  _atom_site_fract_x
+  _atom_site_fract_y
+  _atom_site_fract_z
+  _atom_site_occupancy
+  Os  Os1       1.0  0.8785752058029175  0.8965431451797485  0.6352657079696655  1.0000
+  Os  Os2       1.0  0.6562409996986389  0.6747103929519653  0.29994282126426697  1.0000
+  Os  Os3       1.0  0.43548306822776794  0.4529339373111725  0.9646701812744141  1.0000
