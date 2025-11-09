@@ -7,6 +7,11 @@ from pymatgen.analysis.structure_matcher import StructureMatcher
 from pymatgen.core.structure import Structure
 from pymatgen.io.cif import CifParser
 
+from mattergen.evaluation.utils.structure_matcher import (
+    DefaultDisorderedStructureMatcher,
+    DefaultOrderedStructureMatcher,
+)
+
 import pandas as pd
 
 def extract_zip_to_temp(zip_path: str) -> str:
@@ -42,7 +47,8 @@ ref_mp2020 = ReferenceMP2020Correction()
 
 def find_match(cif_file):
     global ref_mp2020
-    matcher = StructureMatcher()
+    #matcher = StructureMatcher()
+    matcher = DefaultDisorderedStructureMatcher()
     
     this_struct = Structure.from_file(cif_file)
     #print('this_struct=', this_struct)
@@ -70,9 +76,9 @@ def process_cif_directory(cif_dir):
             try:
                 print('[G]  '+fname)
                 matchedlist = find_match(path)
-                outfile=path+'.mp2020-match-v1.gz'
+                outfile=path+'.mp2020-disordered-match.gz'
                 if len(matchedlist) > 0:
-                    dataset_to_save = ReferenceDataset.from_entries(name=fname+".mp2020-match-v1", entries=matchedlist)
+                    dataset_to_save = ReferenceDataset.from_entries(name=fname+".mp2020-disordered-match", entries=matchedlist)
                     LMDBGZSerializer().serialize(dataset_to_save, outfile)
             except Exception as e:
                 print(f"Error with {fname}: {e}")
