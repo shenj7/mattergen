@@ -1,0 +1,20 @@
+Serializing dataset:   0%|          | 0/1 [00:00<?, ?it/s]/home/yexiang/Advanced_Edu/shen7_mattergen/.venv/lib/python3.10/site-packages/uncertainties/core.py:1024: UserWarning: Using UFloat objects with std_dev==0 may give unexpected results.
+  warn("Using UFloat objects with std_dev==0 may give unexpected results.")
+Serializing dataset: 100%|██████████| 1/1 [00:00<00:00, 18.37it/s]
+Saving indexes:   0%|          | 0/1 [00:00<?, ?it/s]Saving indexes: 100%|██████████| 1/1 [00:00<00:00, 17.24it/s]
+Serializing dataset:   0%|          | 0/3 [00:00<?, ?it/s]Serializing dataset: 100%|██████████| 3/3 [00:00<00:00, 20.08it/s]Serializing dataset: 100%|██████████| 3/3 [00:00<00:00, 20.03it/s]
+Saving indexes:   0%|          | 0/1 [00:00<?, ?it/s]Saving indexes: 100%|██████████| 1/1 [00:00<00:00, 15.07it/s]
+Serializing dataset:   0%|          | 0/4 [00:00<?, ?it/s]Serializing dataset:  50%|█████     | 2/4 [00:00<00:00, 17.22it/s]Serializing dataset: 100%|██████████| 4/4 [00:00<00:00, 17.17it/s]Serializing dataset: 100%|██████████| 4/4 [00:00<00:00, 17.16it/s]
+Saving indexes:   0%|          | 0/1 [00:00<?, ?it/s]Saving indexes: 100%|██████████| 1/1 [00:00<00:00, 30.30it/s]
+Serializing dataset:   0%|          | 0/3 [00:00<?, ?it/s]Serializing dataset:  67%|██████▋   | 2/3 [00:00<00:00, 17.23it/s]Serializing dataset: 100%|██████████| 3/3 [00:00<00:00, 17.19it/s]
+Saving indexes:   0%|          | 0/1 [00:00<?, ?it/s]Saving indexes: 100%|██████████| 1/1 [00:00<00:00, 13.38it/s]
+Serializing dataset:   0%|          | 0/3 [00:00<?, ?it/s]Serializing dataset: 100%|██████████| 3/3 [00:00<00:00, 30.14it/s]
+Saving indexes:   0%|          | 0/1 [00:00<?, ?it/s]Saving indexes: 100%|██████████| 1/1 [00:00<00:00, 20.13it/s]
+Serializing dataset:   0%|          | 0/3 [00:00<?, ?it/s]Serializing dataset: 100%|██████████| 3/3 [00:00<00:00, 24.10it/s]Serializing dataset: 100%|██████████| 3/3 [00:00<00:00, 24.04it/s]
+Saving indexes:   0%|          | 0/1 [00:00<?, ?it/s]Saving indexes: 100%|██████████| 1/1 [00:00<00:00, 17.24it/s]
+Serializing dataset:   0%|          | 0/5 [00:00<?, ?it/s]Serializing dataset:  80%|████████  | 4/5 [00:00<00:00, 30.09it/s]Serializing dataset: 100%|██████████| 5/5 [00:00<00:00, 30.07it/s]
+Saving indexes:   0%|          | 0/1 [00:00<?, ?it/s]Saving indexes: 100%|██████████| 1/1 [00:00<00:00, 30.21it/s]
+Serializing dataset:   0%|          | 0/4 [00:00<?, ?it/s]Serializing dataset:  75%|███████▌  | 3/4 [00:00<00:00, 27.83it/s]Serializing dataset: 100%|██████████| 4/4 [00:00<00:00, 28.32it/s]
+Saving indexes:   0%|          | 0/1 [00:00<?, ?it/s]Saving indexes: 100%|██████████| 1/1 [00:00<00:00, 20.12it/s]
+Serializing dataset:   0%|          | 0/12 [00:00<?, ?it/s]Serializing dataset:  25%|██▌       | 3/12 [00:00<00:00, 24.10it/s]Serializing dataset:  50%|█████     | 6/12 [00:00<00:00, 23.13it/s]Serializing dataset:  83%|████████▎ | 10/12 [00:00<00:00, 24.21it/s]Serializing dataset: 100%|██████████| 12/12 [00:00<00:00, 23.24it/s]
+Saving indexes:   0%|          | 0/1 [00:00<?, ?it/s]Saving indexes: 100%|██████████| 1/1 [00:00<00:00, 20.11it/s]
