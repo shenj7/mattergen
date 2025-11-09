@@ -71,7 +71,8 @@ def find_match(cif_file):
 def process_cif_directory(cif_dir):
 
     for fname in os.listdir(cif_dir):
-        if fname.endswith(".cif"):
+        #if fname.endswith(".cif"):
+        if fname.endswith(".relaxed.cif"):
             path = os.path.join(cif_dir, fname)
             try:
                 print('[G]  '+fname)

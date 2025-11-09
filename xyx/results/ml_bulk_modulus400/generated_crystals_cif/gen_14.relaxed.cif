@@ -1,0 +1,36 @@
+# generated using pymatgen
+data_TaReOs8
+_symmetry_space_group_name_H-M   'P 1'
+_cell_length_a   4.77360878
+_cell_length_b   5.50563420
+_cell_length_c   6.16749301
+_cell_angle_alpha   102.89274639
+_cell_angle_beta   97.51877654
+_cell_angle_gamma   106.73889106
+_symmetry_Int_Tables_number   1
+_chemical_formula_structural   TaReOs8
+_chemical_formula_sum   'Ta1 Re1 Os8'
+_cell_volume   147.96873158
+_cell_formula_units_Z   1
+loop_
+ _symmetry_equiv_pos_site_id
+ _symmetry_equiv_pos_as_xyz
+  1  'x, y, z'
+loop_
+ _atom_site_type_symbol
+ _atom_site_label
+ _atom_site_symmetry_multiplicity
+ _atom_site_fract_x
+ _atom_site_fract_y
+ _atom_site_fract_z
+ _atom_site_occupancy
+  Ta  Ta0  1  0.97352226  0.20201736  0.16063836  1
+  Re  Re1  1  0.55357167  0.89258388  0.36502105  1
+  Os  Os2  1  0.37639725  0.50306550  0.96086380  1
+  Os  Os3  1  0.16641517  0.09841401  0.56690404  1
+  Os  Os4  1  0.57372203  0.40323532  0.36986120  1
+  Os  Os5  1  0.96754422  0.70026830  0.16266925  1
+  Os  Os6  1  0.17271932  0.60403903  0.56481678  1
+  Os  Os7  1  0.36676894  0.99501548  0.95515385  1
+  Os  Os8  1  0.76710868  0.79560824  0.75979035  1
+  Os  Os9  1  0.76817950  0.30008985  0.75748588  1
