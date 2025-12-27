@@ -33,6 +33,8 @@ from mattergen.common.utils.globals import DEFAULT_SAMPLING_CONFIG_PATH, get_dev
 from mattergen.diffusion.lightning_module import DiffusionLightningModule
 from mattergen.diffusion.sampling.pc_sampler import PredictorCorrector
 from mattergen.common.utils.data_classes import ProgressCallback
+from mattergen.guidance.bulk_modulus_classifier_guidance import compute_guidance
+from mattergen.property_predictors import BulkModulusTimeClassifier
 
 
 def draw_samples_from_sampler(
@@ -203,10 +205,14 @@ class CrystalGenerator:
     sampling_config_name: str = "default"
 
     record_trajectories: bool = True  # store all intermediate samples by default
+    bulk_modulus_classifier_ckpt: Path | None = None
+    bulk_modulus_guidance_scale: float = 0.0
+    bulk_modulus_guidance_clip: float | None = None
 
     # These attributes are set when prepare() method is called.
     _model: DiffusionLightningModule | None = None
     _cfg: DictConfig | None = None
+    _bulk_modulus_classifier: BulkModulusTimeClassifier | None = None
 
     # can be used to monitor progress of generation
     progress_callback: ProgressCallback | None = None
@@ -347,6 +353,8 @@ class CrystalGenerator:
         model = model.to(get_device())
         self._model = model
         self._cfg = self.checkpoint_info.config
+        if self.bulk_modulus_classifier_ckpt is not None:
+            self._bulk_modulus_classifier = self._load_bulk_modulus_classifier()
 
     def generate(
         self,
@@ -379,6 +387,26 @@ class CrystalGenerator:
         sampler_partial = instantiate(sampling_config.sampler_partial)
         sampler = sampler_partial(pl_module=self.model)
 
+        if (
+            self._bulk_modulus_classifier is not None
+            and abs(self.bulk_modulus_guidance_scale) > 0
+        ):
+            classifier = self._bulk_modulus_classifier.to(get_device())
+            classifier.eval()
+
+            def _guidance_fn(x_t, timestep):
+                return compute_guidance(
+                    x_t=x_t,
+                    t=timestep,
+                    classifier=classifier,
+                    guidance_scale=self.bulk_modulus_guidance_scale,
+                    grad_clip=self.bulk_modulus_guidance_clip,
+                )
+
+            # Attach the guidance callback to the sampler; PredictorCorrector
+            # will call it inside the denoising loop.
+            sampler._guidance_fn = _guidance_fn  # type: ignore[attr-defined]
+
         generated_structures = draw_samples_from_sampler(
             sampler=sampler,
             condition_loader=condition_loader,
@@ -390,3 +418,15 @@ class CrystalGenerator:
         )
 
         return generated_structures
+
+    def _load_bulk_modulus_classifier(self) -> BulkModulusTimeClassifier:
+        ckpt_path = Path(self.bulk_modulus_classifier_ckpt).expanduser().resolve()
+        ckpt = torch.load(ckpt_path, map_location=get_device())
+        model_cfg = ckpt.get("config", {}).get("model_kwargs", {})
+        model = (
+            BulkModulusTimeClassifier(**model_cfg)
+            if isinstance(model_cfg, dict) and model_cfg
+            else BulkModulusTimeClassifier()
+        )
+        model.load_state_dict(ckpt["model_state_dict"])
+        return model

@@ -29,6 +29,7 @@ class LatticeAncestralSamplingPredictor(AncestralSamplingPredictor):
         batch_idx: torch.LongTensor,
         score: torch.Tensor,
         batch: BatchedData | None,
+        guidance: torch.Tensor | None = None,
     ) -> SampleAndMean:
         x_coeff, score_coeff, std = self._get_coeffs(
             x=x,
@@ -49,6 +50,8 @@ class LatticeAncestralSamplingPredictor(AncestralSamplingPredictor):
             + score_coeff * score
             + mean_coeff * self.corruption.get_limit_mean(x=x, batch=batch)
         )
+        if guidance is not None:
+            mean = mean + (std * std) * guidance
         sample = mean + std * z
         return sample, mean
 

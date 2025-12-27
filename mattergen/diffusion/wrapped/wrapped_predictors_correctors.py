@@ -29,6 +29,7 @@ class WrappedPredictorMixin:
         batch_idx: torch.LongTensor,
         score: torch.Tensor,
         batch: Optional[BatchedData],
+        guidance: torch.Tensor | None = None,
     ) -> SampleAndMean:
         # mypy
         assert isinstance(self, predictors.Predictor)
@@ -41,7 +42,13 @@ class WrappedPredictorMixin:
             )
 
         sample, mean = _super.update_given_score(
-            x=x, t=t, dt=dt, batch_idx=batch_idx, score=score, batch=batch
+            x=x,
+            t=t,
+            dt=dt,
+            batch_idx=batch_idx,
+            score=score,
+            batch=batch,
+            guidance=guidance,
         )
         return self.corruption.wrap(sample), self.corruption.wrap(mean)
 

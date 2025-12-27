@@ -1,13 +1,3 @@
-"""
-Noise-conditioned bulk modulus regressor.
-
-This module mirrors the denoiser’s GemNet backbone and timestep encoding so we
-can predict bulk modulus directly from a noisy diffusion state (x_t, t). The
-output is a Gaussian parameterized by (mu, logvar) to enable simple Gaussian
-NLL training. The design stays intentionally small and heavily commented for
-clarity and extensibility.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -24,8 +14,6 @@ from mattergen.diffusion.model_utils import NoiseLevelEncoding
 
 @dataclass
 class BulkModulusClassifierConfig:
-    """Simple container describing how the classifier was initialized."""
-
     hidden_dim: int = 512
     mlp_hidden_dim: int = 256
     logvar_bounds: Sequence[float] = (-10.0, 5.0)
@@ -33,17 +21,6 @@ class BulkModulusClassifierConfig:
 
 
 class BulkModulusTimeClassifier(nn.Module):
-    """
-    Time-conditioned bulk modulus regressor.
-
-    Args:
-        gemnet: Optional GemNet backbone. If not supplied, a default GemNetT
-            mirroring the denoiser setup is created.
-        hidden_dim: Dimensionality of the time embedding and GemNet latent.
-        mlp_hidden_dim: Width of the MLP prediction head.
-        logvar_bounds: Clamp range for log-variance to keep training stable.
-    """
-
     def __init__(
         self,
         gemnet: GemNetT | None = None,
@@ -92,7 +69,6 @@ class BulkModulusTimeClassifier(nn.Module):
 
     @property
     def init_config(self) -> BulkModulusClassifierConfig:
-        """Expose init args so checkpoints can recreate the model."""
         return BulkModulusClassifierConfig(
             hidden_dim=self.hidden_dim,
             mlp_hidden_dim=self.head[0].out_features,

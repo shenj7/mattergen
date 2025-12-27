@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Generic, Mapping, Tuple, TypeVar
+from typing import Callable, Generic, Mapping, Tuple, TypeVar
 
 import torch
 from tqdm.auto import tqdm
@@ -36,6 +36,7 @@ class PredictorCorrector(Generic[Diffusable]):
         N: int,
         eps_t: float = 1e-3,
         max_t: float | None = None,
+        guidance_fn: Callable[[Diffusable, torch.Tensor], dict[str, torch.Tensor]] | None = None,
     ):
         """
         Args:
@@ -47,9 +48,14 @@ class PredictorCorrector(Generic[Diffusable]):
             N: number of noise levels
             eps_t: diffusion time to stop denoising at
             max_t: diffusion time to start denoising at. If None, defaults to the maximum diffusion time. You may want to start at T-0.01, say, for numerical stability.
+            guidance_fn: Optional callable returning per-field guidance gradients
+                from an auxiliary model. The callable should take (x_t, t) and
+                return a dict mapping field name to gradient tensor aligned with
+                that field.
         """
         self._diffusion_module = diffusion_module
         self.N = N
+        self._guidance_fn = guidance_fn
 
         if max_t is None:
             max_t = self._multi_corruption.T
@@ -181,6 +187,12 @@ class PredictorCorrector(Generic[Diffusable]):
             # Set the timestep
             t = torch.full((batch.get_batch_size(),), timesteps[i], device=self._device)
 
+            guidance: dict[str, torch.Tensor] | None = None
+            if self._guidance_fn is not None:
+                # Temporarily enable grads for the classifier guidance pass.
+                with torch.enable_grad():
+                    guidance = self._guidance_fn(batch, t)
+
             # Corrector updates.
             if self._correctors:
                 for _ in range(self._n_steps_corrector):
@@ -210,6 +222,7 @@ class PredictorCorrector(Generic[Diffusable]):
                 fns=predictor_fns,
                 x=batch,
                 score=score,
+                guidance=guidance or {},
                 broadcast=dict(t=t, batch=batch, dt=dt),
                 batch_idx=self._multi_corruption._get_batch_indices(batch),
             )

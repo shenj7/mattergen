@@ -30,6 +30,9 @@ def main(
     strict_checkpoint_loading: bool = True,
     target_compositions: list[dict[str, int]] | None = None,
     progress_callback: ProgressCallback | None = None,
+    bulk_modulus_classifier_ckpt: str | None = None,
+    bulk_modulus_guidance_scale: float = 0.0,
+    bulk_modulus_guidance_clip: float | None = None,
 ) -> list[Structure]:
     """
     Evaluate diffusion model against molecular metrics.
@@ -47,6 +50,9 @@ def main(
         strict_checkpoint_loading: Whether to raise an exception when not all parameters from the checkpoint can be matched to the model.
         target_compositions: List of dictionaries with target compositions to condition on. Each dictionary should have the form `{element: number_of_atoms}`. If None, the target compositions are not conditioned on.
            Only supported for models trained for crystal structure prediction (CSP) (default: None)
+        bulk_modulus_classifier_ckpt: Optional checkpoint for the diffusion-time bulk modulus predictor.
+        bulk_modulus_guidance_scale: Scale factor for classifier-style bulk modulus guidance.
+        bulk_modulus_guidance_clip: Optional gradient-norm clip applied to classifier guidance.
         progress_callback: Optional callback function that takes in a single float argument representing the progress of the generation process (between 0 and 1).
     NOTE: When specifying dictionary values via the CLI, make sure there is no whitespace between the key and value, e.g., `--properties_to_condition_on={key1:value1}`.
     """
@@ -96,6 +102,11 @@ def main(
         ),
         target_compositions_dict=target_compositions,
         progress_callback=progress_callback,
+        bulk_modulus_classifier_ckpt=Path(bulk_modulus_classifier_ckpt).resolve()
+        if bulk_modulus_classifier_ckpt is not None
+        else None,
+        bulk_modulus_guidance_scale=bulk_modulus_guidance_scale,
+        bulk_modulus_guidance_clip=bulk_modulus_guidance_clip,
     )
     return generator.generate(output_dir=Path(output_path))
 

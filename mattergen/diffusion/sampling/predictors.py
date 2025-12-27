@@ -69,6 +69,7 @@ class Predictor(Sampler):
         batch_idx: torch.LongTensor,
         score: torch.Tensor,
         batch: BatchedData | None,
+        guidance: torch.Tensor | None = None,
     ) -> SampleAndMean:
         pass
 
@@ -103,6 +104,7 @@ class AncestralSamplingPredictor(Predictor):
         batch_idx: torch.LongTensor,
         score: torch.Tensor,
         batch: BatchedData | None,
+        guidance: torch.Tensor | None = None,
     ) -> SampleAndMean:
         x_coeff, score_coeff, std = self._get_coeffs(
             x=x,
@@ -115,6 +117,9 @@ class AncestralSamplingPredictor(Predictor):
         z = torch.randn_like(x_coeff)
 
         mean = x_coeff * x + score_coeff * score
+        if guidance is not None:
+            # Shift the reverse mean using classifier-style guidance.
+            mean = mean + (std * std) * guidance
         sample = mean + std * z
 
         return sample, mean
