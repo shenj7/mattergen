@@ -15,6 +15,7 @@ import tempfile
 import zipfile
 from dataclasses import asdict
 from pathlib import Path
+import os
 
 import torch
 import torch.nn.functional as F
@@ -117,9 +118,16 @@ def run_epoch(
             optimizer.zero_grad(set_to_none=True)
 
         targets = batch[property_name].detach().view(-1)
+        valid = torch.isfinite(targets)
+        if not valid.any():
+            # Skip batches without valid labels to avoid NaNs.
+            continue
+        targets = targets[valid]
         t = timestep_sampler(batch_size=batch.get_batch_size(), device=device)
         noisy_batch = corruption.sample_marginal(batch, t)
         mu, logvar = model(noisy_batch, t)
+        mu = mu[valid]
+        logvar = logvar[valid]
         loss = F.mse_loss(mu, targets) if use_mse else gaussian_nll(mu, logvar, targets).mean()
 
         if is_train:
@@ -157,19 +165,37 @@ def parse_args() -> argparse.Namespace:
         "--train_cache_dir",
         type=str,
         default=str(Path(__file__).resolve().parents[2] / "data-release" / "alex-mp" / "train"),
-        help="Path to cached train split (default: data-release/alex-mp/train)",
+        help="Path to cached train split. If present, takes priority over dataset_path.",
     )
     parser.add_argument(
         "--val_cache_dir",
         type=str,
         default=str(Path(__file__).resolve().parents[2] / "data-release" / "alex-mp" / "val"),
-        help="Path to cached val split (default: data-release/alex-mp/val)",
+        help="Path to cached val split. If present, takes priority over dataset_path.",
     )
     parser.add_argument(
         "--dataset_path",
         type=str,
         default=str(Path(__file__).resolve().parents[2] / "data-release" / "alex-mp" / "alex_mp_20.zip"),
         help="Path to a single cached dataset archive/folder (no splits). Will be used if train/val dirs are missing.",
+    )
+    parser.add_argument(
+        "--train_csv",
+        type=str,
+        default=str(Path(__file__).resolve().parents[2] / "data-release" / "mp-20" / "mp_20" / "train.csv"),
+        help="Optional CSV for training split; if provided with val_csv, takes priority over cached dirs.",
+    )
+    parser.add_argument(
+        "--val_csv",
+        type=str,
+        default=str(Path(__file__).resolve().parents[2] / "data-release" / "mp-20" / "mp_20" / "val.csv"),
+        help="Optional CSV for validation split; if provided with train_csv, takes priority over cached dirs.",
+    )
+    parser.add_argument(
+        "--csv_cache_root",
+        type=str,
+        default=str(Path(__file__).resolve().parents[2] / "data-release" / "mp-20" / "cache"),
+        help="Where to cache numpy arrays when loading from CSVs.",
     )
     parser.add_argument(
         "--val_fraction",
@@ -347,7 +373,7 @@ def build_synthetic_loader(
     Generate synthetic structures with a diffusion model, label via oracle, and wrap
     them into a GeoDataLoader for augmentation.
     """
-    device = get_device()
+    device = torch.get_device()
     with tempfile.TemporaryDirectory() as tmpdir:
         generator = CrystalGenerator(
             checkpoint_info=info,
@@ -401,18 +427,39 @@ def _has_cache_files(folder: Path) -> bool:
 def load_datasets(args, transforms):
     """
     Load train/val datasets. If explicit train/val cache dirs exist, use them.
-    Otherwise, load a single dataset archive/folder and split into train/val.
+    Otherwise, if train/val CSVs are provided, cache them and load.
+    Otherwise, load a single dataset archive/folder and split into train/val,
+    or use provided train/val subfolders if they exist in the archive.
     Returns (train_dataset, val_dataset, tmpdir_or_None) so caller can keep tmp alive.
     """
+    props = [args.property_name]
     train_dir = Path(args.train_cache_dir)
     val_dir = Path(args.val_cache_dir)
-    props = [args.property_name]
     if _has_cache_files(train_dir) and _has_cache_files(val_dir):
         return (
             CrystalDataset.from_cache_path(cache_path=train_dir, properties=props, transforms=transforms),
             CrystalDataset.from_cache_path(cache_path=val_dir, properties=props, transforms=transforms),
             None,
         )
+
+    # If CSVs are provided, cache them and use that.
+    if args.train_csv and args.val_csv:
+        csv_cache_root = Path(args.csv_cache_root)
+        train_cache = csv_cache_root / "train"
+        val_cache = csv_cache_root / "val"
+        train_cache.mkdir(parents=True, exist_ok=True)
+        val_cache.mkdir(parents=True, exist_ok=True)
+        train_dataset = CrystalDataset.from_csv(
+            csv_path=args.train_csv,
+            cache_path=str(train_cache),
+            transforms=transforms,
+        )
+        val_dataset = CrystalDataset.from_csv(
+            csv_path=args.val_csv,
+            cache_path=str(val_cache),
+            transforms=transforms,
+        )
+        return train_dataset, val_dataset, None
 
     cache_root, tmpdir = _maybe_extract_dataset(Path(args.dataset_path))
     # If archive already contains train/val subfolders, use them.
