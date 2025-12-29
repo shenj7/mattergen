@@ -442,16 +442,25 @@ def load_datasets(args, transforms):
         val_cache = csv_cache_root / "val"
         train_cache.mkdir(parents=True, exist_ok=True)
         val_cache.mkdir(parents=True, exist_ok=True)
-        train_dataset = CrystalDataset.from_csv(
-            csv_path=args.train_csv,
-            cache_path=str(train_cache),
-            transforms=transforms,
-        )
-        val_dataset = CrystalDataset.from_csv(
-            csv_path=args.val_csv,
-            cache_path=str(val_cache),
-            transforms=transforms,
-        )
+        # If cached numpy files already exist, load from cache to avoid re-parsing CIFs.
+        if _has_cache_files(train_cache) and _has_cache_files(val_cache):
+            train_dataset = CrystalDataset.from_cache_path(
+                cache_path=str(train_cache), properties=props, transforms=transforms
+            )
+            val_dataset = CrystalDataset.from_cache_path(
+                cache_path=str(val_cache), properties=props, transforms=transforms
+            )
+        else:
+            train_dataset = CrystalDataset.from_csv(
+                csv_path=args.train_csv,
+                cache_path=str(train_cache),
+                transforms=transforms,
+            )
+            val_dataset = CrystalDataset.from_csv(
+                csv_path=args.val_csv,
+                cache_path=str(val_cache),
+                transforms=transforms,
+            )
         return train_dataset, val_dataset, None
 
     cache_root, tmpdir = _maybe_extract_dataset(Path(args.dataset_path))
