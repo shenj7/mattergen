@@ -118,9 +118,15 @@ def run_epoch(
             optimizer.zero_grad(set_to_none=True)
 
         targets = batch[property_name].detach().view(-1)
+        finite_mask = torch.isfinite(targets)
+        if not finite_mask.any():
+            continue
+        targets = targets[finite_mask]
         t = timestep_sampler(batch_size=batch.get_batch_size(), device=device)
         noisy_batch = corruption.sample_marginal(batch, t)
         mu, logvar = model(noisy_batch, t)
+        mu = mu[finite_mask]
+        logvar = logvar[finite_mask]
         loss = F.mse_loss(mu, targets) if use_mse else gaussian_nll(mu, logvar, targets).mean()
 
         if is_train:
@@ -201,8 +207,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--property_name",
         type=str,
-        default="ml_bulk_modulus",
-        help="Dataset property key to supervise on (e.g., ml_bulk_modulus or dft_bulk_modulus)",
+        default="dft_bulk_modulus",
+        help="Dataset property key to supervise on (e.g., dft_bulk_modulus or ml_bulk_modulus)",
     )
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=10)
