@@ -118,16 +118,9 @@ def run_epoch(
             optimizer.zero_grad(set_to_none=True)
 
         targets = batch[property_name].detach().view(-1)
-        valid = torch.isfinite(targets)
-        if not valid.any():
-            # Skip batches without valid labels to avoid NaNs.
-            continue
-        targets = targets[valid]
         t = timestep_sampler(batch_size=batch.get_batch_size(), device=device)
         noisy_batch = corruption.sample_marginal(batch, t)
         mu, logvar = model(noisy_batch, t)
-        mu = mu[valid]
-        logvar = logvar[valid]
         loss = F.mse_loss(mu, targets) if use_mse else gaussian_nll(mu, logvar, targets).mean()
 
         if is_train:
