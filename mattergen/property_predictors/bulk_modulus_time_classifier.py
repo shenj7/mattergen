@@ -28,6 +28,8 @@ class BulkModulusTimeClassifier(nn.Module):
         hidden_dim: int = 512,
         mlp_hidden_dim: int = 256,
         logvar_bounds: Sequence[float] = (-10.0, 5.0),
+        gemnet_kwargs: dict | None = None,
+        **_: dict,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -36,7 +38,9 @@ class BulkModulusTimeClassifier(nn.Module):
 
         # Create a GemNet backbone that mirrors the denoiser defaults so the
         # classifier consumes the exact same representation.
-        self.gemnet = gemnet or self._build_default_gemnet(hidden_dim=hidden_dim)
+        self.gemnet = gemnet or self._build_default_gemnet(
+            hidden_dim=hidden_dim, gemnet_kwargs=gemnet_kwargs or {}
+        )
 
         # Pool graph/node embeddings to a crystal representation and predict
         # Gaussian parameters.
@@ -50,7 +54,7 @@ class BulkModulusTimeClassifier(nn.Module):
         )
 
     @staticmethod
-    def _build_default_gemnet(hidden_dim: int) -> GemNetT:
+    def _build_default_gemnet(hidden_dim: int, gemnet_kwargs: dict) -> GemNetT:
         # Matches the denoiser defaults: GemNetT with on-the-fly graphs and
         # stress prediction to keep lattice signals consistent.
         atom_embedding = AtomEmbedding(emb_size=hidden_dim, with_mask_type=True)
@@ -65,6 +69,7 @@ class BulkModulusTimeClassifier(nn.Module):
             cutoff=7.0,
             max_neighbors=50,
             max_cell_images_per_dim=5,
+            **gemnet_kwargs,
         )
 
     @property
