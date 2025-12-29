@@ -21,11 +21,34 @@ def ase_to_phonopy(a: Atoms) -> PhonopyAtoms:
         scaled_positions=a.get_scaled_positions()
     )
 
+def _phonopy_symbols(p: PhonopyAtoms) -> list[str]:
+    if hasattr(p, "get_chemical_symbols"):
+        return p.get_chemical_symbols()
+    if hasattr(p, "symbols"):
+        return list(p.symbols)
+    if hasattr(p, "get_symbols"):
+        return p.get_symbols()
+    raise AttributeError("PhonopyAtoms has no symbol accessor")
+
+def _phonopy_cell(p: PhonopyAtoms):
+    if hasattr(p, "get_cell"):
+        return p.get_cell()
+    if hasattr(p, "cell"):
+        return p.cell
+    raise AttributeError("PhonopyAtoms has no cell accessor")
+
+def _phonopy_scaled_positions(p: PhonopyAtoms):
+    if hasattr(p, "get_scaled_positions"):
+        return p.get_scaled_positions()
+    if hasattr(p, "scaled_positions"):
+        return p.scaled_positions
+    raise AttributeError("PhonopyAtoms has no scaled_positions accessor")
+
 def phonopy_to_ase(p: PhonopyAtoms) -> Atoms:
     return Atoms(
-        symbols=p.get_chemical_symbols(),
-        cell=p.get_cell(),
-        scaled_positions=p.get_scaled_positions(),
+        symbols=_phonopy_symbols(p),
+        cell=_phonopy_cell(p),
+        scaled_positions=_phonopy_scaled_positions(p),
         pbc=True
     )
 
