@@ -38,6 +38,7 @@ from mattergen.diffusion.timestep_samplers import UniformTimestepSampler
 from mattergen.generator import CrystalGenerator
 from mattergen.property_predictors import BulkModulusTimeClassifier
 from mattergen.guidance.calc_bulk_modulus import run_bulk_modulus_oracle
+from mattergen.diffusion.lightning_module import DiffusionLightningModule
 
 
 def bulk_modulus_oracle(structure) -> float:
@@ -220,6 +221,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--logvar_min", type=float, default=-10.0)
     parser.add_argument("--logvar_max", type=float, default=5.0)
     parser.add_argument("--use_mse", action="store_true", help="Fallback to MSE loss")
+    parser.add_argument(
+        "--pretrained_gemnet_ckpt",
+        type=str,
+        default=None,
+        help="Optional diffusion checkpoint to initialize the GemNet backbone weights.",
+    )
     # Synthetic augmentation via diffusion generator
     parser.add_argument(
         "--synthetic_model_path",
@@ -285,6 +292,8 @@ def main() -> None:
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
     )
+    if args.pretrained_gemnet_ckpt:
+        _maybe_load_pretrained_gemnet(model, Path(args.pretrained_gemnet_ckpt))
 
     best_val = float("inf")
     cfg = {
@@ -490,6 +499,28 @@ def load_datasets(args, transforms):
     generator = torch.Generator().manual_seed(args.seed)
     train_dataset, val_dataset = random_split(full, [train_size, val_size], generator=generator)
     return train_dataset, val_dataset, tmpdir
+
+
+def _maybe_load_pretrained_gemnet(model: BulkModulusTimeClassifier, ckpt_path: Path) -> None:
+    """
+    Load GemNet weights from a diffusion checkpoint into the classifier backbone.
+    Ignores missing/unexpected keys gracefully.
+    """
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"Pretrained GemNet checkpoint not found: {ckpt_path}")
+
+    print(f"Loading pretrained GemNet weights from {ckpt_path}")
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    state_dict = ckpt.get("state_dict", ckpt)
+    prefix = "diffusion_module.model.gemnet."
+    gemnet_state = {
+        k.replace(prefix, ""): v for k, v in state_dict.items() if k.startswith(prefix)
+    }
+    missing, unexpected = model.gemnet.load_state_dict(gemnet_state, strict=False)
+    if missing:
+        print(f"Warning: missing GemNet keys when loading pretrained weights: {missing}")
+    if unexpected:
+        print(f"Warning: unexpected GemNet keys when loading pretrained weights: {unexpected}")
 
 
 if __name__ == "__main__":
