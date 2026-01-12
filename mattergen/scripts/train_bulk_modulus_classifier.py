@@ -36,7 +36,11 @@ from mattergen.diffusion.corruption.multi_corruption import MultiCorruption
 from mattergen.diffusion.d3pm.d3pm import MaskDiffusion, create_discrete_diffusion_schedule
 from mattergen.diffusion.timestep_samplers import UniformTimestepSampler
 from mattergen.generator import CrystalGenerator
-from mattergen.property_predictors import BulkModulusTimeClassifier
+from mattergen.common.peft.lora import LoRALinear
+from mattergen.property_predictors import (
+    BulkModulusLoRATimePredictor,
+    BulkModulusTimeClassifier,
+)
 from mattergen.guidance.calc_bulk_modulus import run_bulk_modulus_oracle
 from mattergen.diffusion.lightning_module import DiffusionLightningModule
 
@@ -98,7 +102,7 @@ def gaussian_nll(mu: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor) -
 
 def run_epoch(
     *,
-    model: BulkModulusTimeClassifier,
+    model: BulkModulusTimeClassifier | BulkModulusLoRATimePredictor,
     loader: GeoDataLoader,
     corruption: MultiCorruption,
     timestep_sampler: UniformTimestepSampler,
@@ -142,7 +146,7 @@ def run_epoch(
 def save_checkpoint(
     out_dir: Path,
     name: str,
-    model: BulkModulusTimeClassifier,
+    model: BulkModulusTimeClassifier | BulkModulusLoRATimePredictor,
     optimizer: torch.optim.Optimizer,
     epoch: int,
     cfg: dict,
@@ -222,6 +226,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--logvar_max", type=float, default=5.0)
     parser.add_argument("--use_mse", action="store_true", help="Fallback to MSE loss")
     parser.add_argument(
+        "--predictor_type",
+        type=str,
+        choices=["mlp", "lora"],
+        default="mlp",
+        help="Choose predictor head: MLP on pooled backbone or LoRA-adapted GemNet with linear head.",
+    )
+    parser.add_argument("--lora_rank", type=int, default=8)
+    parser.add_argument("--lora_alpha", type=float, default=8.0)
+    parser.add_argument(
         "--pretrained_gemnet_ckpt",
         type=str,
         default=None,
@@ -284,11 +297,19 @@ def main() -> None:
     corruption = build_default_corruption()
     timestep_sampler = UniformTimestepSampler(min_t=1e-5, max_t=corruption.T)
 
-    model = BulkModulusTimeClassifier(
-        hidden_dim=args.hidden_dim,
-        mlp_hidden_dim=args.mlp_hidden_dim,
-        logvar_bounds=(args.logvar_min, args.logvar_max),
-    ).to(device)
+    if args.predictor_type == "lora":
+        model = BulkModulusLoRATimePredictor(
+            hidden_dim=args.hidden_dim,
+            logvar_bounds=(args.logvar_min, args.logvar_max),
+            lora_rank=args.lora_rank,
+            lora_alpha=args.lora_alpha,
+        ).to(device)
+    else:
+        model = BulkModulusTimeClassifier(
+            hidden_dim=args.hidden_dim,
+            mlp_hidden_dim=args.mlp_hidden_dim,
+            logvar_bounds=(args.logvar_min, args.logvar_max),
+        ).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
     )
@@ -501,7 +522,9 @@ def load_datasets(args, transforms):
     return train_dataset, val_dataset, tmpdir
 
 
-def _maybe_load_pretrained_gemnet(model: BulkModulusTimeClassifier, ckpt_path: Path) -> None:
+def _maybe_load_pretrained_gemnet(
+    model: BulkModulusTimeClassifier | BulkModulusLoRATimePredictor, ckpt_path: Path
+) -> None:
     """
     Load GemNet weights from a diffusion checkpoint into the classifier backbone.
     Ignores missing/unexpected keys gracefully.
@@ -516,11 +539,32 @@ def _maybe_load_pretrained_gemnet(model: BulkModulusTimeClassifier, ckpt_path: P
     gemnet_state = {
         k.replace(prefix, ""): v for k, v in state_dict.items() if k.startswith(prefix)
     }
+    if any(isinstance(module, LoRALinear) for module in model.gemnet.modules()):
+        gemnet_state = _remap_lora_state_dict(gemnet_state, model.gemnet.state_dict())
     missing, unexpected = model.gemnet.load_state_dict(gemnet_state, strict=False)
     if missing:
         print(f"Warning: missing GemNet keys when loading pretrained weights: {missing}")
     if unexpected:
         print(f"Warning: unexpected GemNet keys when loading pretrained weights: {unexpected}")
+
+
+def _remap_lora_state_dict(
+    state_dict: dict[str, torch.Tensor], model_state: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
+    remapped: dict[str, torch.Tensor] = {}
+    for key, value in state_dict.items():
+        if key in model_state:
+            remapped[key] = value
+            continue
+        if key.endswith(".weight"):
+            lora_key = key.replace(".weight", ".base_layer.weight")
+        elif key.endswith(".bias"):
+            lora_key = key.replace(".bias", ".base_layer.bias")
+        else:
+            continue
+        if lora_key in model_state:
+            remapped[lora_key] = value
+    return remapped
 
 
 if __name__ == "__main__":
