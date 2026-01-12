@@ -45,13 +45,27 @@ class BulkModulusTimeClassifier(nn.Module):
         # Pool graph/node embeddings to a crystal representation and predict
         # Gaussian parameters.
         head_in = hidden_dim + hidden_dim  # pooled graph + explicit time embedding
+        # self.head = nn.Sequential(   ### outputs_guided_4_epochs_1_guidance
+        #                              ### outputs_guided_4_epochs_2_guidance
+        #     nn.Linear(head_in, mlp_hidden_dim),
+        #     nn.SiLU(),
+        #     nn.Linear(mlp_hidden_dim, mlp_hidden_dim),
+        #     nn.SiLU(),
+        #     nn.Linear(mlp_hidden_dim, 2),
+        # )
         self.head = nn.Sequential(
             nn.Linear(head_in, mlp_hidden_dim),
             nn.SiLU(),
+            nn.Dropout(p=0.1),
             nn.Linear(mlp_hidden_dim, mlp_hidden_dim),
             nn.SiLU(),
+            nn.Dropout(p=0.1),
+            nn.Linear(mlp_hidden_dim, mlp_hidden_dim),
+            nn.SiLU(),
+            nn.Dropout(p=0.1),
             nn.Linear(mlp_hidden_dim, 2),
         )
+
 
     @staticmethod
     def _build_default_gemnet(hidden_dim: int, gemnet_kwargs: dict) -> GemNetT:
