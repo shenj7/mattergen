@@ -36,7 +36,7 @@ from mattergen.diffusion.corruption.multi_corruption import MultiCorruption
 from mattergen.diffusion.d3pm.d3pm import MaskDiffusion, create_discrete_diffusion_schedule
 from mattergen.diffusion.timestep_samplers import UniformTimestepSampler
 from mattergen.generator import CrystalGenerator
-from mattergen.common.peft.lora import LoRALinear
+from mattergen.common.peft.lora import LoRALayer
 from mattergen.property_predictors import (
     BulkModulusLoRATimePredictor,
     BulkModulusTimeClassifier,
@@ -539,7 +539,7 @@ def _maybe_load_pretrained_gemnet(
     gemnet_state = {
         k.replace(prefix, ""): v for k, v in state_dict.items() if k.startswith(prefix)
     }
-    if any(isinstance(module, LoRALinear) for module in model.gemnet.modules()):
+    if any(isinstance(module, LoRALayer) for module in model.gemnet.modules()):
         gemnet_state = _remap_lora_state_dict(gemnet_state, model.gemnet.state_dict())
     missing, unexpected = model.gemnet.load_state_dict(gemnet_state, strict=False)
     if missing:

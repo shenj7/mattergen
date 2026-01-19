@@ -106,3 +106,19 @@ class BulkModulusLoRATimePredictor(nn.Module):
         logvar = logvar.clamp(min=self.logvar_bounds[0], max=self.logvar_bounds[1])
 
         return mu.squeeze(-1), logvar.squeeze(-1)
+
+    @classmethod
+    def from_checkpoint(
+        cls, checkpoint_path: str, device: torch.device | str = "cpu"
+    ) -> "BulkModulusLoRATimePredictor":
+        """
+        Load a BulkModulusLoRATimePredictor from a checkpoint file.
+
+        This method correctly instantiates the model with its LoRA-adapted
+        architecture before loading the weights.
+        """
+        ckpt = torch.load(checkpoint_path, map_location=device)
+        config = ckpt["config"]["model_kwargs"]
+        model = cls(**config)
+        model.load_state_dict(ckpt["model_state_dict"])
+        return model.to(device)

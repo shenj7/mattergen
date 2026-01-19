@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 
-class LoRALinear(nn.Module):
+class LoRALayer(nn.Module):
     """
     LoRA adapter for a frozen linear layer.
 
@@ -35,11 +35,11 @@ class LoRALinear(nn.Module):
 
 def apply_lora(module: nn.Module, rank: int = 8, alpha: float = 8.0) -> nn.Module:
     """
-    Replace every nn.Linear with a LoRALinear wrapper.
+    Replace every nn.Linear with a LoRALayer wrapper.
     """
     for name, child in list(module.named_children()):
         if isinstance(child, nn.Linear):
-            setattr(module, name, LoRALinear(child, rank=rank, alpha=alpha))
+            setattr(module, name, LoRALayer(child, rank=rank, alpha=alpha))
         else:
             apply_lora(child, rank=rank, alpha=alpha)
     return module
