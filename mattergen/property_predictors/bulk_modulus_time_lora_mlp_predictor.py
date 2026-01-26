@@ -9,18 +9,25 @@ from torch_scatter import scatter_mean
 
 from mattergen.common.gemnet.gemnet import GemNetT
 from mattergen.common.gemnet.layers.embedding_block import AtomEmbedding
+from mattergen.common.peft.lora import apply_lora
 from mattergen.diffusion.model_utils import NoiseLevelEncoding
 
 
 @dataclass
-class BulkModulusClassifierConfig:
+class BulkModulusLoRAMLPClassifierConfig:
     hidden_dim: int = 512
     mlp_hidden_dim: int = 256
     logvar_bounds: Sequence[float] = (-10.0, 5.0)
+    lora_rank: int = 8
+    lora_alpha: float = 8.0
     gemnet_kwargs: dict | None = None
 
 
-class BulkModulusTimeClassifier(nn.Module):
+class BulkModulusLoRAMLPTimePredictor(nn.Module):
+    """
+    GemNet backbone with frozen weights + LoRA adapters and a richer MLP head.
+    """
+
     def __init__(
         self,
         gemnet: GemNetT | None = None,
@@ -28,31 +35,26 @@ class BulkModulusTimeClassifier(nn.Module):
         hidden_dim: int = 512,
         mlp_hidden_dim: int = 256,
         logvar_bounds: Sequence[float] = (-10.0, 5.0),
+        lora_rank: int = 8,
+        lora_alpha: float = 8.0,
         gemnet_kwargs: dict | None = None,
         **_: dict,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
+        self.mlp_hidden_dim = mlp_hidden_dim
         self.logvar_bounds = (float(logvar_bounds[0]), float(logvar_bounds[1]))
+        self.lora_rank = lora_rank
+        self.lora_alpha = lora_alpha
         self.noise_level_encoding = NoiseLevelEncoding(hidden_dim)
 
-        # Create a GemNet backbone that mirrors the denoiser defaults so the
-        # classifier consumes the exact same representation.
         self.gemnet = gemnet or self._build_default_gemnet(
             hidden_dim=hidden_dim, gemnet_kwargs=gemnet_kwargs or {}
         )
+        self._freeze_gemnet_parameters()
+        apply_lora(self.gemnet, rank=lora_rank, alpha=lora_alpha)
 
-        # Pool graph/node embeddings to a crystal representation and predict
-        # Gaussian parameters.
-        head_in = hidden_dim + hidden_dim  # pooled graph + explicit time embedding
-        # self.head = nn.Sequential(   ### outputs_guided_4_epochs_1_guidance
-        #                              ### outputs_guided_4_epochs_2_guidance
-        #     nn.Linear(head_in, mlp_hidden_dim),
-        #     nn.SiLU(),
-        #     nn.Linear(mlp_hidden_dim, mlp_hidden_dim),
-        #     nn.SiLU(),
-        #     nn.Linear(mlp_hidden_dim, 2),
-        # )
+        head_in = hidden_dim + hidden_dim
         self.head = nn.Sequential(
             nn.Linear(head_in, mlp_hidden_dim),
             nn.SiLU(),
@@ -66,11 +68,8 @@ class BulkModulusTimeClassifier(nn.Module):
             nn.Linear(mlp_hidden_dim, 2),
         )
 
-
     @staticmethod
     def _build_default_gemnet(hidden_dim: int, gemnet_kwargs: dict) -> GemNetT:
-        # Matches the denoiser defaults: GemNetT with on-the-fly graphs and
-        # stress prediction to keep lattice signals consistent.
         atom_embedding = AtomEmbedding(emb_size=hidden_dim, with_mask_type=True)
         return GemNetT(
             num_targets=1,
@@ -86,31 +85,24 @@ class BulkModulusTimeClassifier(nn.Module):
             **gemnet_kwargs,
         )
 
+    def _freeze_gemnet_parameters(self) -> None:
+        for param in self.gemnet.parameters():
+            param.requires_grad = False
+
     @property
-    def init_config(self) -> BulkModulusClassifierConfig:
-        return BulkModulusClassifierConfig(
+    def init_config(self) -> BulkModulusLoRAMLPClassifierConfig:
+        return BulkModulusLoRAMLPClassifierConfig(
             hidden_dim=self.hidden_dim,
-            mlp_hidden_dim=self.head[0].out_features,
+            mlp_hidden_dim=self.mlp_hidden_dim,
             logvar_bounds=self.logvar_bounds,
+            lora_rank=self.lora_rank,
+            lora_alpha=self.lora_alpha,
             gemnet_kwargs=None,
         )
 
     def forward(self, x, t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Predict bulk modulus parameters from a noisy diffusion state.
-
-        Args:
-            x: ChemGraph batch at timestep t (same fields as the denoiser).
-            t: Tensor of shape [batch_size] with diffusion times.
-
-        Returns:
-            mu: Mean prediction, shape [batch_size]
-            logvar: Log-variance prediction, shape [batch_size]
-        """
-        # Time embedding (same sinusoidal encoding as the denoiser).
         t_emb = self.noise_level_encoding(t).to(x["cell"].device)
 
-        # GemNet takes the time embedding as a per-crystal latent "z".
         gemnet_out = self.gemnet(
             z=t_emb,
             frac_coords=x["pos"],
@@ -123,12 +115,10 @@ class BulkModulusTimeClassifier(nn.Module):
             num_bonds=None,
         )
 
-        # Node embeddings -> pooled crystal embedding.
         node_embeddings = gemnet_out.node_embeddings
         batch_idx = x.get_batch_idx("pos")
         pooled = scatter_mean(node_embeddings, batch_idx, dim=0)
 
-        # Concatenate pooled representation with explicit time embedding.
         head_in = torch.cat([pooled, t_emb], dim=-1)
         mu_logvar = self.head(head_in)
         mu, logvar = mu_logvar.split(1, dim=-1)
@@ -136,11 +126,13 @@ class BulkModulusTimeClassifier(nn.Module):
 
         return mu.squeeze(-1), logvar.squeeze(-1)
 
-    
     @classmethod
     def from_checkpoint(
         cls, checkpoint_path: str, device: torch.device | str = "cpu"
-    ) -> BulkModulusTimeClassifier:
+    ) -> "BulkModulusLoRAMLPTimePredictor":
+        """
+        Load a BulkModulusLoRAMLPTimePredictor from a checkpoint file.
+        """
         ckpt = torch.load(checkpoint_path, map_location=device)
         config = ckpt["config"]["model_kwargs"]
         model = cls(**config)
