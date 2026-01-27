@@ -38,6 +38,7 @@ from mattergen.diffusion.timestep_samplers import UniformTimestepSampler
 from mattergen.generator import CrystalGenerator
 from mattergen.common.peft.lora import LoRALayer
 from mattergen.property_predictors import (
+    BulkModulusLoRAMLPTimePredictor,
     BulkModulusLoRATimePredictor,
     BulkModulusTimeClassifier,
 )
@@ -102,7 +103,7 @@ def gaussian_nll(mu: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor) -
 
 def run_epoch(
     *,
-    model: BulkModulusTimeClassifier | BulkModulusLoRATimePredictor,
+    model: BulkModulusTimeClassifier | BulkModulusLoRATimePredictor | BulkModulusLoRAMLPTimePredictor,
     loader: GeoDataLoader,
     corruption: MultiCorruption,
     timestep_sampler: UniformTimestepSampler,
@@ -228,9 +229,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--predictor_type",
         type=str,
-        choices=["mlp", "lora"],
+        choices=["mlp", "lora", "lora_mlp"],
         default="mlp",
-        help="Choose predictor head: MLP on pooled backbone or LoRA-adapted GemNet with linear head.",
+        help="Choose predictor head: MLP on pooled backbone, LoRA-adapted GemNet with linear head, or LoRA + MLP head.",
     )
     parser.add_argument("--lora_rank", type=int, default=8)
     parser.add_argument("--lora_alpha", type=float, default=8.0)
@@ -300,6 +301,14 @@ def main() -> None:
     if args.predictor_type == "lora":
         model = BulkModulusLoRATimePredictor(
             hidden_dim=args.hidden_dim,
+            logvar_bounds=(args.logvar_min, args.logvar_max),
+            lora_rank=args.lora_rank,
+            lora_alpha=args.lora_alpha,
+        ).to(device)
+    elif args.predictor_type == "lora_mlp":
+        model = BulkModulusLoRAMLPTimePredictor(
+            hidden_dim=args.hidden_dim,
+            mlp_hidden_dim=args.mlp_hidden_dim,
             logvar_bounds=(args.logvar_min, args.logvar_max),
             lora_rank=args.lora_rank,
             lora_alpha=args.lora_alpha,
@@ -523,7 +532,8 @@ def load_datasets(args, transforms):
 
 
 def _maybe_load_pretrained_gemnet(
-    model: BulkModulusTimeClassifier | BulkModulusLoRATimePredictor, ckpt_path: Path
+    model: BulkModulusTimeClassifier | BulkModulusLoRATimePredictor | BulkModulusLoRAMLPTimePredictor,
+    ckpt_path: Path,
 ) -> None:
     """
     Load GemNet weights from a diffusion checkpoint into the classifier backbone.

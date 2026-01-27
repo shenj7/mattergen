@@ -12,7 +12,11 @@ from torch_geometric.loader import DataLoader as GeoDataLoader
 from tqdm import tqdm
 
 from mattergen.common.data.transform import symmetrize_lattice
-from mattergen.property_predictors import BulkModulusLoRATimePredictor, BulkModulusTimeClassifier
+from mattergen.property_predictors import (
+    BulkModulusLoRAMLPTimePredictor,
+    BulkModulusLoRATimePredictor,
+    BulkModulusTimeClassifier,
+)
 from mattergen.scripts.train_bulk_modulus_classifier import load_datasets
 
 
@@ -24,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--predictor_type",
         type=str,
-        choices=["mlp", "lora"],
+        choices=["mlp", "lora", "lora_mlp"],
         default="mlp",
         help="Model type used when training the checkpoint.",
     )
@@ -104,6 +108,8 @@ def _load_model(args: argparse.Namespace, device: torch.device):
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
     if args.predictor_type == "lora":
         return BulkModulusLoRATimePredictor.from_checkpoint(str(ckpt_path), device=device)
+    if args.predictor_type == "lora_mlp":
+        return BulkModulusLoRAMLPTimePredictor.from_checkpoint(str(ckpt_path), device=device)
     return BulkModulusTimeClassifier.from_checkpoint(str(ckpt_path), device=device)
 
 
