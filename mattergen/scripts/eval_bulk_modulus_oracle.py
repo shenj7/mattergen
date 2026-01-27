@@ -5,6 +5,7 @@ Evaluate the calc_bulk_modulus.py estimator on clean (denoised) materials.
 from __future__ import annotations
 
 import argparse
+import csv
 from pathlib import Path
 
 import torch
@@ -97,6 +98,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--val_fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--csv_path",
+        type=str,
+        default=None,
+        help="Optional path to write predicted vs true CSV. Defaults to calc_bulk_modulus_pred_vs_true.csv in the working directory.",
+    )
     return parser.parse_args()
 
 
@@ -188,6 +195,20 @@ def main() -> None:
     print(f"Evaluated {len(targets)} samples with calc_bulk_modulus_value")
     for name, value in metrics.items():
         print(f"{name}: {value:.6f}")
+
+    csv_path = (
+        Path(args.csv_path)
+        if args.csv_path is not None
+        else Path.cwd() / "calc_bulk_modulus_pred_vs_true.csv"
+    )
+    csv_path = csv_path.resolve()
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["predicted", "true_value"])
+        for pred, true in zip(preds, targets):
+            writer.writerow([pred, true])
+    print(f"Wrote predictions CSV to {csv_path}")
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ Evaluate a diffusion-time bulk modulus predictor on clean (denoised) materials.
 from __future__ import annotations
 
 import argparse
+import csv
 from pathlib import Path
 
 import torch
@@ -60,6 +61,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional cap on number of batches to evaluate (0 = no cap).",
     )
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument(
+        "--csv_path",
+        type=str,
+        default=None,
+        help="Optional path to write predicted vs true CSV. Defaults to bulk_modulus_pred_vs_true.csv in the checkpoint folder.",
+    )
 
     parser.add_argument(
         "--train_cache_dir",
@@ -188,6 +195,20 @@ def main() -> None:
     print(f"Evaluated {target_all.numel()} samples at t={args.t_eval:.6f}")
     for name, value in metrics.items():
         print(f"{name}: {value:.6f}")
+
+    csv_path = (
+        Path(args.csv_path)
+        if args.csv_path is not None
+        else Path(args.checkpoint_path).resolve().parent / "bulk_modulus_pred_vs_true.csv"
+    )
+    csv_path = csv_path.resolve()
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["predicted_mu", "true_value", "logvar"])
+        for pred, true, lv in zip(mu_all.cpu().tolist(), target_all.cpu().tolist(), logvar_all.cpu().tolist()):
+            writer.writerow([pred, true, lv])
+    print(f"Wrote predictions CSV to {csv_path}")
 
 
 if __name__ == "__main__":
