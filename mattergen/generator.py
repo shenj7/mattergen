@@ -216,8 +216,12 @@ class CrystalGenerator:
     # These attributes are set when prepare() method is called.
     _model: DiffusionLightningModule | None = None
     _cfg: DictConfig | None = None
-    _bulk_modulus_classifier:
-        BulkModulusTimeClassifier | BulkModulusLoRATimePredictor | BulkModulusLoRAMLPTimePredictor | None = None
+    _bulk_modulus_classifier: (
+        BulkModulusTimeClassifier
+        | BulkModulusLoRATimePredictor
+        | BulkModulusLoRAMLPTimePredictor
+        | None
+    ) = None
 
     # can be used to monitor progress of generation
     progress_callback: ProgressCallback | None = None
