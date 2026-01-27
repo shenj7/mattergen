@@ -35,6 +35,7 @@ from mattergen.diffusion.sampling.pc_sampler import PredictorCorrector
 from mattergen.common.utils.data_classes import ProgressCallback
 from mattergen.guidance.bulk_modulus_classifier_guidance import compute_guidance
 from mattergen.property_predictors import (
+    BulkModulusLoRAMLPTimePredictor,
     BulkModulusLoRATimePredictor,
     BulkModulusTimeClassifier,
 )
@@ -215,7 +216,8 @@ class CrystalGenerator:
     # These attributes are set when prepare() method is called.
     _model: DiffusionLightningModule | None = None
     _cfg: DictConfig | None = None
-    _bulk_modulus_classifier: BulkModulusTimeClassifier | BulkModulusLoRATimePredictor | None = None
+    _bulk_modulus_classifier:
+        BulkModulusTimeClassifier | BulkModulusLoRATimePredictor | BulkModulusLoRAMLPTimePredictor | None = None
 
     # can be used to monitor progress of generation
     progress_callback: ProgressCallback | None = None
@@ -424,24 +426,23 @@ class CrystalGenerator:
 
     def _load_bulk_modulus_classifier(
         self,
-    ) -> BulkModulusTimeClassifier | BulkModulusLoRATimePredictor:
+    ) -> BulkModulusTimeClassifier | BulkModulusLoRATimePredictor | BulkModulusLoRAMLPTimePredictor:
         ckpt_path = str(Path(self.bulk_modulus_classifier_ckpt).expanduser().resolve())
         ckpt = torch.load(ckpt_path, map_location=get_device())
         # Inspect the checkpoint to decide which model class to use
-        is_lora = ckpt.get("config", {}).get("args", {}).get("predictor_type") == "lora"
+        predictor_type = ckpt.get("config", {}).get("args", {}).get("predictor_type", "mlp")
 
-        if is_lora:
-            # Use the from_checkpoint method for LoRA models
-            return BulkModulusLoRATimePredictor.from_checkpoint(
-                ckpt_path, device=get_device()
-            )
-        else:
-            # Original logic for standard models
-            model_cfg = ckpt.get("config", {}).get("model_kwargs", {})
-            model = (
-                BulkModulusTimeClassifier(**model_cfg)
-                if isinstance(model_cfg, dict) and model_cfg
-                else BulkModulusTimeClassifier()
-            )
-            model.load_state_dict(ckpt["model_state_dict"])
-            return model
+        if predictor_type == "lora":
+            return BulkModulusLoRATimePredictor.from_checkpoint(ckpt_path, device=get_device())
+        if predictor_type == "lora_mlp":
+            return BulkModulusLoRAMLPTimePredictor.from_checkpoint(ckpt_path, device=get_device())
+
+        # Original logic for standard models
+        model_cfg = ckpt.get("config", {}).get("model_kwargs", {})
+        model = (
+            BulkModulusTimeClassifier(**model_cfg)
+            if isinstance(model_cfg, dict) and model_cfg
+            else BulkModulusTimeClassifier()
+        )
+        model.load_state_dict(ckpt["model_state_dict"])
+        return model
