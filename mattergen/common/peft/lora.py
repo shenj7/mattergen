@@ -33,13 +33,20 @@ class LoRALayer(nn.Module):
         return self.base_layer(x) + self.lora_B(self.lora_A(x)) * self.scaling
 
 
-def apply_lora(module: nn.Module, rank: int = 8, alpha: float = 8.0) -> nn.Module:
+def apply_lora(module: nn.Module, rank: int = 8, alpha: float = 8.0, target_modules: list[str] | None = None) -> nn.Module:
     """
-    Replace every nn.Linear with a LoRALayer wrapper.
+    Replace nn.Linear with a LoRALayer wrapper, optionally filtering by module name.
     """
     for name, child in list(module.named_children()):
-        if isinstance(child, nn.Linear):
+        # If target_modules is specified, check if the child's class name or attribute name matches
+        is_target = target_modules is None or any(
+            t in name or t in child.__class__.__name__ for t in target_modules
+        )
+        
+        if isinstance(child, nn.Linear) and is_target:
             setattr(module, name, LoRALayer(child, rank=rank, alpha=alpha))
         else:
-            apply_lora(child, rank=rank, alpha=alpha)
+            # If this is not a target module itself, but contains submodules, we still want to recurse down
+            # However, if target_modules IS specified, we only pass it down if this ISN'T a Linear layer we skipped
+            apply_lora(child, rank=rank, alpha=alpha, target_modules=target_modules)
     return module

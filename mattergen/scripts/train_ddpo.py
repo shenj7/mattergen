@@ -45,109 +45,26 @@ from mattergen.rl import DDPOConfig, DDPOTrainer, MatterGenActor, ValueNetwork
 # Import bulk modulus calculator
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from calc_bulk_modulus_single import calc_bulk_modulus_value
+from mattergen.property_predictors.bulk_modulus_time_lora_mlp_predictor import BulkModulusLoRAMLPTimePredictor
 
 
-def create_reward_fn(reward_type: str = "bulk_modulus", device: torch.device = None):
+def create_reward_fn(reward_net, device: torch.device):
     """
-    Create a reward function for training.
+    Create a reward function using the frozen BulkModulusLoRAMLPTimePredictor.
+    Evaluates x_0 at t=0 to predict final bulk modulus.
     
-    Args:
-        reward_type: Type of reward ("bulk_modulus", "simple_density")
-        device: Device for computations
-        
     Returns:
-        Callable that takes a ChemGraph and returns a float reward
+        Callable that takes a ChemGraph and returns a (batch_size,) Tensor
     """
-    if reward_type == "bulk_modulus":
-        def reward_fn(x_0: ChemGraph) -> float:
-            """
-            Compute bulk modulus reward using MatterSim-based E-V fitting.
-            """
-            try:
-                # Convert ChemGraph to ASE Atoms - ensure no grad tracking
-                with torch.no_grad():
-                    batch_size = x_0.get_batch_size()
-                    total_reward = 0.0
-                    
-                    for i in range(batch_size):
-                        # Extract single crystal from batch
-                        batch_mask = x_0.get_batch_idx("pos") == i
-                        
-                        # Handle positions (may have gradients)
-                        pos_tensor = x_0["pos"][batch_mask]
-                        if pos_tensor.requires_grad:
-                            positions = pos_tensor.detach().cpu().numpy()
-                        else:
-                            positions = pos_tensor.cpu().numpy()
-                        
-                        # Handle atomic numbers (usually LongTensor, no grad)
-                        atom_tensor = x_0["atomic_numbers"][batch_mask]
-                        atomic_numbers = atom_tensor.cpu().numpy()
-                        
-                        # Handle cell (may have gradients)
-                        cell_tensor = x_0["cell"][i]
-                        if cell_tensor.requires_grad:
-                            cell = cell_tensor.detach().cpu().numpy()
-                        else:
-                            cell = cell_tensor.cpu().numpy()
-                        
-                        # Create ASE Atoms
-                        # MatterGen outputs fractional coordinates, ASE expects Cartesian
-                        # Convert fractional -> Cartesian: pos_cart = pos_frac @ cell
-                        positions_cart = positions @ cell
-                        
-                        from ase import Atoms
-                        atoms = Atoms(
-                            numbers=atomic_numbers.astype(int),
-                            positions=positions_cart,
-                            cell=cell,
-                            pbc=True,
-                        )
-                        
-                        # Calculate bulk modulus (fast E-V fitting method)
-                        # MatterSim needs autograd to compute forces/stress internally
-                        # We use enable_grad() but since inputs are numpy (detached), this is safe
-                        with torch.enable_grad():
-                            bulk_mod = calc_bulk_modulus_value(atoms, n_points=5, strain=0.03)
-                        
-                        # Clip to reasonable range and normalize
-                        bulk_mod = max(0.0, min(float(bulk_mod), 500.0))  # Clip to [0, 500] GPa
-                        total_reward += bulk_mod
-                    
-                    return total_reward / batch_size
-                
-            except Exception as e:
-                import traceback
-                print(f"Reward computation failed: {e}")
-                traceback.print_exc()
-                return 0.0
-        
-        return reward_fn
-    
-    elif reward_type == "simple_density":
-        def reward_fn(x_0: ChemGraph) -> float:
-            """Heuristic reward favoring compact structures."""
-            batch_size = x_0.get_batch_size()
-            total_reward = 0.0
+    def reward_fn(x_0: ChemGraph) -> torch.Tensor:
+        with torch.no_grad():
+            t = torch.zeros((x_0.get_batch_size(),), device=device)
+            # Evaluate the bulk modulus for the batch
+            # Shape is (batch_size,)
+            mu, logvar = reward_net(x_0, t)
+            return mu
             
-            for i in range(batch_size):
-                batch_mask = x_0.get_batch_idx("pos") == i
-                positions = x_0["pos"][batch_mask]
-                cell = x_0["cell"][i]
-                
-                volume = torch.abs(torch.det(cell)).item()
-                n_atoms = positions.shape[0]
-                density = n_atoms / (volume + 1e-6)
-                
-                reward = density * 50.0
-                total_reward += min(reward, 200.0)
-            
-            return total_reward / batch_size
-        
-        return reward_fn
-    
-    else:
-        raise ValueError(f"Unknown reward type: {reward_type}")
+    return reward_fn
 
 
 def main():
@@ -278,9 +195,19 @@ def main():
     if critic_path.exists():
         print(f"Loading critic from: {critic_path}")
         critic = ValueNetwork.from_classifier_checkpoint(critic_path, device=device)
+        
+        print(f"Loading frozen reward network from: {critic_path}")
+        reward_net = BulkModulusLoRAMLPTimePredictor.from_checkpoint(critic_path, device=device)
+        reward_net.eval()
+        for param in reward_net.parameters():
+            param.requires_grad = False
     else:
         print("Critic checkpoint not found, creating from scratch")
         critic = ValueNetwork(hidden_dim=512, mlp_hidden_dim=256)
+        reward_net = BulkModulusLoRAMLPTimePredictor(hidden_dim=512, mlp_hidden_dim=256).to(device)
+        reward_net.eval()
+        for param in reward_net.parameters():
+            param.requires_grad = False
     
     # Create sampler for trajectory collection
     generator = CrystalGenerator(
@@ -297,7 +224,7 @@ def main():
     sampler = sampler_partial(pl_module=model)
     
     # Create reward function
-    reward_fn = create_reward_fn(args.reward_type, device=device)
+    reward_fn = create_reward_fn(reward_net, device=device)
     
     # Create DDPO config
     ddpo_config = DDPOConfig(
@@ -357,9 +284,18 @@ def main():
     
     # Summary
     if metrics_history:
-        rewards = [m.get("mean_reward", 0) for m in metrics_history]
-        print(f"Final mean reward: {rewards[-1]:.2f}")
-        print(f"Best mean reward: {max(rewards):.2f}")
+        rewards = [m.get("mean_reward", 0.0) for m in metrics_history]
+        # if reward is a tensor, we make sure it's printed as float
+        if isinstance(rewards[-1], torch.Tensor):
+             print(f"Final mean reward: {rewards[-1].mean().item():.2f}")
+             
+        try:
+             best_reward = max(m.get("mean_reward", 0.0) for m in metrics_history)
+             if isinstance(best_reward, torch.Tensor):
+                 best_reward = best_reward.mean().item()
+             print(f"Best mean reward: {best_reward:.2f}")
+        except Exception:
+             pass
 
 
 if __name__ == "__main__":

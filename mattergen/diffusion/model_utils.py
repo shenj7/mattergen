@@ -68,7 +68,9 @@ class NoiseLevelEncoding(torch.nn.Module):
         Args:
             t: Tensor, shape [batch_size]
         """
-        x = torch.zeros((t.shape[0], self.d_model), device=self.div_term.device)
-        x[:, 0::2] = torch.sin(t[:, None] * self.div_term[None])
-        x[:, 1::2] = torch.cos(t[:, None] * self.div_term[None])
+        device = t.device
+        x = torch.zeros((t.shape[0], self.d_model), device=device)
+        div_term = self.div_term.to(device)
+        x[:, 0::2] = torch.sin(t[:, None] * div_term[None])
+        x[:, 1::2] = torch.cos(t[:, None] * div_term[None])
         return self.dropout(x)

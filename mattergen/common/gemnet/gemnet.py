@@ -711,20 +711,37 @@ class GemNetT(torch.nn.Module):
         )
         F_fully_connected = torch.tensor(0.0, device=distorted_lattice.device)
         for i in range(self.num_blocks):
-            # Interaction block
-            h, m = self.int_blocks[i](
-                h=h,
-                m=m,
-                rbf3=rbf3,
-                cbf3=cbf3,
-                id3_ragged_idx=id3_ragged_idx,
-                id_swap=id_swap,
-                id3_ba=id3_ba,
-                id3_ca=id3_ca,
-                rbf_h=rbf_h,
-                idx_s=idx_s,
-                idx_t=idx_t,
-            )  # (nAtoms, emb_size_atom), (nEdges, emb_size_edge)
+            # Interaction block with gradient checkpointing
+            if self.training and h.requires_grad:
+                h, m = torch.utils.checkpoint.checkpoint(
+                    self.int_blocks[i],
+                    h,
+                    m,
+                    rbf3,
+                    cbf3,
+                    id3_ragged_idx,
+                    id_swap,
+                    id3_ba,
+                    id3_ca,
+                    rbf_h,
+                    idx_s,
+                    idx_t,
+                    use_reentrant=False,
+                )
+            else:
+                h, m = self.int_blocks[i](
+                    h=h,
+                    m=m,
+                    rbf3=rbf3,
+                    cbf3=cbf3,
+                    id3_ragged_idx=id3_ragged_idx,
+                    id_swap=id_swap,
+                    id3_ba=id3_ba,
+                    id3_ca=id3_ca,
+                    rbf_h=rbf_h,
+                    idx_s=idx_s,
+                    idx_t=idx_t,
+                )  # (nAtoms, emb_size_atom), (nEdges, emb_size_edge)
 
             E, F = self.out_blocks[i + 1](h, m, rbf_out, idx_t)
             # (nAtoms, num_targets), (nEdges, num_targets)
