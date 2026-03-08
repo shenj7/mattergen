@@ -110,21 +110,27 @@ def get_structure_from_cache(data: dict, idx: int) -> Structure:
 
 def structure_to_chemgraph(struct: Structure):
     """Convert a pymatgen Structure to a ChemGraph for the classifier."""
-    from mattergen.common.data.chemgraph import ChemGraph
+    from mattergen.common.data.dataset import structures_to_numpy, CrystalDataset
     from mattergen.common.data.transform import symmetrize_lattice
     
-    frac_coords = torch.tensor(struct.frac_coords, dtype=torch.float32) % 1.0
-    cell = torch.tensor(struct.lattice.matrix, dtype=torch.float32).unsqueeze(0)
-    atomic_numbers = torch.tensor(struct.atomic_numbers, dtype=torch.long)
-    num_atoms = torch.tensor(len(struct), dtype=torch.long)
+    # Needs a placeholder property to pass the structures_to_numpy parser
+    struct.properties["material_id"] = "test"
     
-    cg = ChemGraph(
-        pos=frac_coords,
-        cell=cell,
-        atomic_numbers=atomic_numbers,
-        num_atoms=num_atoms,
-        num_nodes=num_atoms,
+    # 1. Convert to exactly the same numpy arrays that CrystalDataset uses
+    structure_infos, properties = structures_to_numpy([struct])
+    
+    # 2. Build a minimal CrystalDataset
+    dataset = CrystalDataset(
+        pos=structure_infos["pos"],
+        cell=structure_infos["cell"],
+        atomic_numbers=structure_infos["atomic_numbers"],
+        num_atoms=structure_infos["num_atoms"],
+        structure_id=structure_infos["structure_id"],
     )
+    
+    # 3. Get the valid ChemGraph natively from the dataset
+    cg = dataset[0]
+    
     # Apply the same transform used during training
     cg = symmetrize_lattice(cg)
     return cg

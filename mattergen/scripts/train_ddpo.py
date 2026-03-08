@@ -57,11 +57,20 @@ def create_reward_fn(reward_net, device: torch.device):
         Callable that takes a ChemGraph and returns a (batch_size,) Tensor
     """
     def reward_fn(x_0: ChemGraph) -> torch.Tensor:
+        from mattergen.common.data.transform import symmetrize_lattice
         with torch.no_grad():
             t = torch.zeros((x_0.get_batch_size(),), device=device)
+            
+            # Wrap to periodic cell bounds
+            x_eval = x_0.clone()
+            x_eval = x_eval.replace(pos=x_eval.pos % 1.0)
+            
+            # Reconstruct symmetric matrix based on primitive cell lengths + angles
+            x_eval = symmetrize_lattice(x_eval)
+            
             # Evaluate the bulk modulus for the batch
             # Shape is (batch_size,)
-            mu, logvar = reward_net(x_0, t)
+            mu, logvar = reward_net(x_eval, t)
             return mu
             
     return reward_fn

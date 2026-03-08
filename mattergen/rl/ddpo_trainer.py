@@ -71,6 +71,7 @@ class TrajectoryStep(NamedTuple):
     action_atoms: torch.Tensor  # Sampled atom types
     log_prob_cont: torch.Tensor  # Log prob of continuous actions
     log_prob_disc: torch.Tensor  # Log prob of discrete actions
+    dt: torch.Tensor  # Timestep spacing parameter
 
 
 @dataclass
@@ -132,6 +133,7 @@ class MatterGenActor(nn.Module):
         self,
         x: ChemGraph,
         t: torch.Tensor,
+        dt: torch.Tensor,
     ) -> ActorOutput:
         
         """
@@ -140,6 +142,7 @@ class MatterGenActor(nn.Module):
         Args:
             x: Noisy crystal state at timestep t
             t: Diffusion timesteps (batch_size,)
+            dt: Timestep spacing (scalar tensor)
             
         Returns:
             ActorOutput with loc, scale, and logits
@@ -147,45 +150,71 @@ class MatterGenActor(nn.Module):
         # Get score model output (this is the denoiser prediction)
         score_output = self.denoiser(x, t)
         
-        # Extract predictions
-        # Position: predicted noise (used as mean for Gaussian)
-        loc_pos = score_output["pos"]
+        score_pos = score_output["pos"]
+        score_cell = score_output["cell"]
+        score_atoms = score_output["atomic_numbers"]
         
-        # Cell: predicted noise for lattice
-        loc_cell = score_output["cell"]
+        batch_idx_pos = x.get_batch_idx("pos")
+        corruptions = getattr(self.diffusion_module.corruption, "corruptions", {})
         
-        # Atom types: logits for classification
-        logits_atoms = score_output["atomic_numbers"]
+        sde_pos = corruptions.get("pos")
+        sde_cell = corruptions.get("cell")
+        sde_atoms = corruptions.get("atomic_numbers")
         
-        # Get scale from the SDE marginal probability
-        # For VP-SDE: std increases with t
-        batch_idx = x.get_batch_idx("pos")
-        sde_pos = self.diffusion_module.corruption.sdes.get("pos")
-        sde_cell = self.diffusion_module.corruption.sdes.get("cell")
-        
+        # 1. POSITIONS (Wrapped Ancestral Sampling)
         if sde_pos is not None:
-            _, std_pos = sde_pos.marginal_prob(
-                x=torch.ones_like(loc_pos),
-                t=t,
-                batch_idx=batch_idx,
-                batch=x,
+            from mattergen.diffusion.wrapped.wrapped_predictors_correctors import WrappedAncestralSamplingPredictor
+            from mattergen.diffusion.sampling.predictors import AncestralSamplingPredictor
+            
+            if hasattr(sde_pos, "wrap"):
+                pred_pos = WrappedAncestralSamplingPredictor(corruption=sde_pos, score_fn=None)
+            else:
+                pred_pos = AncestralSamplingPredictor(corruption=sde_pos, score_fn=None)
+            
+            x_coeff_pos, score_coeff_pos, std_pos = pred_pos._get_coeffs(
+                x=x["pos"], t=t, dt=dt, batch_idx=batch_idx_pos, batch=x
             )
+            loc_pos = x_coeff_pos * x["pos"] + score_coeff_pos * score_pos
             scale_pos = std_pos.clamp(min=1e-6)
+            
+            if hasattr(sde_pos, "wrap"):
+                loc_pos = sde_pos.wrap(loc_pos)
         else:
-            # Fallback: constant scale
+            loc_pos = score_pos
             scale_pos = torch.ones_like(loc_pos) * 0.1
             
+        # 2. CELL (Lattice Ancestral Sampling)
         if sde_cell is not None:
-            _, std_cell = sde_cell.marginal_prob(
-                x=torch.ones_like(loc_cell),
-                t=t,
-                batch_idx=None,
-                batch=x,
+            from mattergen.common.diffusion.predictors_correctors import LatticeAncestralSamplingPredictor
+            pred_cell = LatticeAncestralSamplingPredictor(corruption=sde_cell, score_fn=None)
+            x_coeff_cell, score_coeff_cell, std_cell = pred_cell._get_coeffs(
+                x=x["cell"], t=t, dt=dt, batch_idx=None, batch=x
             )
+            mean_coeff = 1.0 - x_coeff_cell
+            limit_mean = sde_cell.get_limit_mean(x=x["cell"], batch=x) if hasattr(sde_cell, "get_limit_mean") else 0.0
+            loc_cell = x_coeff_cell * x["cell"] + score_coeff_cell * score_cell + mean_coeff * limit_mean
             scale_cell = std_cell.clamp(min=1e-6)
         else:
+            loc_cell = score_cell
             scale_cell = torch.ones_like(loc_cell) * 0.1
             
+        # 3. ATOMIC NUMBERS (D3PM Discrete Posterior q)
+        if sde_atoms is not None:
+            from mattergen.diffusion.discrete_time import to_discrete_time
+            t_discrete = to_discrete_time(t=t, N=sde_atoms.N, T=sde_atoms.T)
+            class_probs = torch.softmax(score_atoms, dim=-1)
+            
+            class_logits, _ = sde_atoms.d3pm.sample_and_compute_posterior_q(
+                x_0=class_probs,
+                t=t_discrete[batch_idx_pos].to(torch.long),
+                make_one_hot=False,
+                samples=sde_atoms._to_zero_based(x["atomic_numbers"]),
+                return_logits=True,
+            )
+            logits_atoms = class_logits
+        else:
+            logits_atoms = score_atoms
+        
         return ActorOutput(
             loc_pos=loc_pos,
             scale_pos=scale_pos,
@@ -198,6 +227,7 @@ class MatterGenActor(nn.Module):
         self,
         states: list[ChemGraph],
         timesteps: torch.Tensor,
+        dts: torch.Tensor,
         actions_pos: torch.Tensor,
         actions_cell: torch.Tensor,
         actions_atoms: torch.Tensor,
@@ -216,24 +246,27 @@ class MatterGenActor(nn.Module):
         log_probs_disc = []
         entropies = []
         
-        for i, (state, t) in enumerate(zip(states, timesteps)):
-            # Forward pass for this state. t is already (batch_size,), no unsqueeze needed.
-            output = self.forward(state, t)
+        for i, (state, t, dt) in enumerate(zip(states, timesteps, dts)):
+            # Forward pass for this state. t and dt are (batch_size,) scalars representing the batch
+            output = self.forward(state, t, dt)
             
             # Continuous distribution (position + cell)
             dist_pos = Normal(output.loc_pos, output.scale_pos)
             dist_cell = Normal(output.loc_cell, output.scale_cell)
             
-            # Get log probs for this step's actions
-            # Handle per-atom actions for positions
-            batch_idx = state.get_batch_idx("pos")
+            # Get step's actions
             step_actions_pos = actions_pos[i] if actions_pos.dim() == 3 else actions_pos
             step_actions_cell = actions_cell[i] if actions_cell.dim() == 4 else actions_cell
             step_actions_atoms = actions_atoms[i] if actions_atoms.dim() == 2 else actions_atoms
             
-            # Log prob continuous: sum over dimensions
-            lp_pos = dist_pos.log_prob(step_actions_pos).sum()
-            lp_cell = dist_cell.log_prob(step_actions_cell).sum()
+            from torch_scatter import scatter
+            batch_idx_pos = state.get_batch_idx("pos")
+            
+            # Log prob continuous: grouped by individual graphs
+            lp_pos_atoms = dist_pos.log_prob(step_actions_pos).sum(dim=-1)
+            lp_pos = scatter(lp_pos_atoms, batch_idx_pos, dim=0, reduce="sum")
+            
+            lp_cell = dist_cell.log_prob(step_actions_cell).sum(dim=(1, 2))
             log_prob_cont = lp_pos + lp_cell
             
             # Clamp for numerical stability
@@ -243,18 +276,25 @@ class MatterGenActor(nn.Module):
             )
             
             # Discrete distribution (atom types)
-            # Clamp logits to prevent extreme probabilities
             logits_clamped = output.logits_atoms.clamp(-20, 20)
             dist_atoms = Categorical(logits=logits_clamped)
             
-            # step_actions_atoms contains 1-indexed atomic numbers, but Categorical expects 0-indexed classes
-            log_prob_disc = dist_atoms.log_prob(step_actions_atoms - 1).sum()
-            log_prob_disc = log_prob_disc.clamp(
-                min=torch.log(torch.tensor(config.prob_clamp_min, device=log_prob_disc.device)),
-                max=torch.log(torch.tensor(config.prob_clamp_max, device=log_prob_disc.device)),
+            corruptions = getattr(self.diffusion_module.corruption, "corruptions", {})
+            d3pm_corr = corruptions.get("atomic_numbers")
+            
+            if d3pm_corr is not None:
+                atoms_0_idx = d3pm_corr._to_zero_based(step_actions_atoms)
+            else:
+                atoms_0_idx = step_actions_atoms
+                
+            lp_atoms = dist_atoms.log_prob(atoms_0_idx)
+            log_prob_disc = scatter(lp_atoms, batch_idx_pos, dim=0, reduce="sum").clamp(
+                min=torch.log(torch.tensor(config.prob_clamp_min, device=lp_atoms.device)),
+                max=torch.log(torch.tensor(config.prob_clamp_max, device=lp_atoms.device)),
             )
             
-            entropy = dist_atoms.entropy().mean()
+            entropy_atoms = dist_atoms.entropy()
+            entropy = scatter(entropy_atoms, batch_idx_pos, dim=0, reduce="mean")
             
             log_probs_cont.append(log_prob_cont)
             log_probs_disc.append(log_prob_disc)
@@ -271,8 +311,9 @@ class MatterGenActor(nn.Module):
         self,
         x: ChemGraph,
         t: torch.Tensor,
+        dt: torch.Tensor,
         config: DDPOConfig,
-    ) -> tuple[ChemGraph, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[ChemGraph, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, ChemGraph]:
         
         """
         Sample an action (denoising step) from the policy.
@@ -285,18 +326,39 @@ class MatterGenActor(nn.Module):
             log_prob_cont: Log probability of continuous actions
             log_prob_disc: Log probability of discrete actions
         """
-        output = self.forward(x, t)
+        output = self.forward(x, t, dt)
         
-        # Sample from continuous distributions
+        # Sample from continuous distributions using explicit reparameterization for symmetric constraints
+        eps_pos = torch.randn_like(output.loc_pos)
+        action_pos = output.loc_pos + output.scale_pos * eps_pos
+        
+        eps_cell = torch.randn_like(output.loc_cell)
+        corruptions = getattr(self.diffusion_module.corruption, "corruptions", {})
+        sde_cell = corruptions.get("cell")
+        sde_pos = corruptions.get("pos")
+        
+        if sde_cell is not None:
+            try:
+                from mattergen.common.diffusion.corruption import make_noise_symmetric_preserve_variance
+                eps_cell = make_noise_symmetric_preserve_variance(eps_cell)
+            except ImportError:
+                pass
+                
+        action_cell = output.loc_cell + output.scale_cell * eps_cell
+        
+        # Log probs for continuous
         dist_pos = Normal(output.loc_pos, output.scale_pos)
         dist_cell = Normal(output.loc_cell, output.scale_cell)
         
-        action_pos = dist_pos.rsample()  # For gradient flow
-        action_cell = dist_cell.rsample()
+        # Calculate per-crystal log probabilities (do not sum across the entire batch of 4 graphs simultaneously)
+        from torch_scatter import scatter
+        batch_idx_pos = x.get_batch_idx("pos")
         
-        # Log probs for continuous
-        log_prob_pos = dist_pos.log_prob(action_pos).sum()
-        log_prob_cell = dist_cell.log_prob(action_cell).sum()
+        lp_pos_atoms = dist_pos.log_prob(action_pos).sum(dim=-1)
+        log_prob_pos = scatter(lp_pos_atoms, batch_idx_pos, dim=0, reduce="sum")
+        
+        log_prob_cell = dist_cell.log_prob(action_cell).sum(dim=(1, 2))
+        
         log_prob_cont = (log_prob_pos + log_prob_cell).clamp(
             min=torch.log(torch.tensor(config.prob_clamp_min, device=log_prob_pos.device)),
             max=torch.log(torch.tensor(config.prob_clamp_max, device=log_prob_pos.device)),
@@ -305,23 +367,52 @@ class MatterGenActor(nn.Module):
         # Sample from discrete distribution
         logits_clamped = output.logits_atoms.clamp(-20, 20)
         dist_atoms = Categorical(logits=logits_clamped)
-        # action_atoms from Categorical is 0-indexed. Add 1 to get Z=1..100
-        action_atoms = dist_atoms.sample() + 1
         
-        # log_prob takes the 0-indexed sample, so subtract 1
-        log_prob_disc = dist_atoms.log_prob(action_atoms - 1).sum().clamp(
+        action_atoms_0nd = dist_atoms.sample()
+        corruptions = getattr(self.diffusion_module.corruption, "corruptions", {})
+        d3pm_corr = corruptions.get("atomic_numbers")
+        
+        if d3pm_corr is not None:
+            action_atoms = d3pm_corr._to_non_zero_based(action_atoms_0nd)
+        else:
+            action_atoms = action_atoms_0nd
+        
+        lp_atoms = dist_atoms.log_prob(action_atoms_0nd)
+        log_prob_disc = scatter(lp_atoms, batch_idx_pos, dim=0, reduce="sum").clamp(
             min=torch.log(torch.tensor(config.prob_clamp_min, device=action_atoms.device)),
             max=torch.log(torch.tensor(config.prob_clamp_max, device=action_atoms.device)),
         )
         
+        # Wrap pos correctly so the next state lies in [0, 1] without breaking gradient graphs
+        next_pos = action_pos
+        if sde_pos is not None and hasattr(sde_pos, "wrap"):
+            next_pos = sde_pos.wrap(action_pos)
+            
         # Construct next state
         next_state = x.replace(
-            pos=action_pos,
+            pos=next_pos,
             cell=action_cell,
             atomic_numbers=action_atoms,
         )
         
-        return next_state, action_pos, action_cell, action_atoms, log_prob_cont, log_prob_disc
+        # Construct mean state (denoised representation without injected gaussian noise)
+        mean_pos = output.loc_pos
+        if sde_pos is not None and hasattr(sde_pos, "wrap"):
+            mean_pos = sde_pos.wrap(mean_pos)
+            
+        mean_atoms_0nd = torch.argmax(logits_clamped, dim=-1)
+        if d3pm_corr is not None:
+            mean_atoms = d3pm_corr._to_non_zero_based(mean_atoms_0nd)
+        else:
+            mean_atoms = mean_atoms_0nd
+            
+        mean_state = x.replace(
+            pos=mean_pos,
+            cell=output.loc_cell,
+            atomic_numbers=mean_atoms,
+        )
+        
+        return next_state, action_pos, action_cell, action_atoms, log_prob_cont, log_prob_disc, mean_state
 
 
 # =============================================================================
@@ -537,6 +628,7 @@ class DDPOTrainer:
                     state = _sample_prior(sampler._multi_corruption, conditioning_data, mask=None)
                     
                     timesteps = torch.linspace(sampler._max_t, sampler._eps_t, sampler.N, device=self.device)
+                    dt_scalar = -torch.tensor((sampler._max_t - sampler._eps_t) / (sampler.N - 1)).to(self.device)
                     
                     steps = []
                     # Rollout from T to 0
@@ -544,10 +636,33 @@ class DDPOTrainer:
                         t_val = timesteps[i]
                         # Create states/tensors on CPU for the Actor
                         t = torch.full((state.get_batch_size(),), t_val, device=self.device)
+                        dt = torch.full((state.get_batch_size(),), dt_scalar, device=self.device)
                         
+                        # Apply Langevin Correctors exactly like pc_sampler does to stabilize generations
+                        if hasattr(sampler, "_correctors") and sampler._correctors:
+                            for _ in range(getattr(sampler, "_n_steps_corrector", 1)):
+                                score_val = sampler._score_fn(state, t)
+                                
+                                # Process each corrector using the exact same mapping function as pc_sampler
+                                from mattergen.diffusion.corruption.multi_corruption import apply
+                                fns = {k: corrector.step_given_score for k, corrector in sampler._correctors.items()}
+                                
+                                samples_means = apply(
+                                    fns=fns,
+                                    broadcast={"t": t, "dt": dt},
+                                    x=state,
+                                    score=score_val,
+                                    batch_idx=sampler._multi_corruption._get_batch_indices(state),
+                                )
+                                
+                                # Samples_means returns a dictionary of Tuple[sample, mean]. 
+                                # We update the physical state with the new stochastic sample before the next step.
+                                state_updates = {k: v[0] for k, v in samples_means.items()}
+                                state = state.replace(**state_updates)
+                                    
                         # Sample action from the current actor policy (on CPU)
-                        next_state, action_pos, action_cell, action_atoms, lp_cont, lp_disc = self.actor.sample_action(
-                            state, t, self.config
+                        next_state, action_pos, action_cell, action_atoms, lp_cont, lp_disc, mean_state = self.actor.sample_action(
+                            state, t, dt, self.config
                         )
                         
                         # Use the sampled actions to manually step the external state
@@ -562,10 +677,11 @@ class DDPOTrainer:
                             action_atoms=action_atoms.clone(),
                             log_prob_cont=lp_cont.clone(),
                             log_prob_disc=lp_disc.clone(),
+                            dt=dt.clone(),
                         ))
                         
                     # Final sample x_0
-                    sample = state
+                    sample = mean_state
                     
                     # Compute terminal reward using x_0 and t=0 inside reward_fn
                     reward = self.reward_fn(sample)
@@ -622,6 +738,7 @@ class DDPOTrainer:
         self,
         states: list[ChemGraph],
         timesteps: torch.Tensor,
+        dts: torch.Tensor,
         actions_pos: torch.Tensor,
         actions_cell: torch.Tensor,
         actions_atoms: torch.Tensor,
@@ -640,16 +757,13 @@ class DDPOTrainer:
         """
         cfg = self.config
         
-        # Ensure advantages and returns are 1D (batch_size,)
-        # Sometimes critic predictions have shape (batch_size, num_targets)
-        if advantages.dim() > 1:
-            advantages = advantages.mean(dim=-1)
-        if returns.dim() > 1:
-            returns = returns.mean(dim=-1)
-            
+        # Ensure advantages and returns are passed directly. 
+        # Previously they were incorrectly averaged with .mean(dim=-1), obliterating per-crystal optimization.
+        # Advantages are [batch_size, num_crystals_in_batch] and should remain that way.
+        
         # Get new log probabilities and entropy
         new_log_probs_cont, new_log_probs_disc, entropy_disc = self.actor.evaluate_actions(
-            states, timesteps, actions_pos, actions_cell, actions_atoms, cfg
+            states, timesteps, dts, actions_pos, actions_cell, actions_atoms, cfg
         )
         
         # ==== Separate PPO Ratios (THE KEY INSIGHT) ====
@@ -679,7 +793,7 @@ class DDPOTrainer:
         # Compare current discrete policy to frozen reference
         with torch.no_grad():
             ref_log_probs_cont, ref_log_probs_disc, _ = self.ref_actor.evaluate_actions(
-                states, timesteps, actions_pos, actions_cell, actions_atoms, cfg
+                states, timesteps, dts, actions_pos, actions_cell, actions_atoms, cfg
             )
         
         # KL(ref || new) for discrete actions
@@ -692,11 +806,9 @@ class DDPOTrainer:
         
         # ==== Value Loss ====
         values = torch.stack([
-            self.critic(state, t).squeeze()
+            self.critic(state, t).squeeze(-1) if self.critic(state, t).dim() > 1 else self.critic(state, t)
             for state, t in zip(states, timesteps)
         ])
-        if values.dim() > 1:
-            values = values.mean(dim=-1)
         value_loss = F.mse_loss(values, returns)
         
         # ==== Total Loss ====
@@ -734,6 +846,7 @@ class DDPOTrainer:
         # Ensure all captured data is completely detached before moving forward to avoid graph retention properly.
         states = [step.state for traj in trajectories for step in traj.steps]
         timesteps = torch.stack([step.timestep for traj in trajectories for step in traj.steps]).detach()
+        dts = torch.stack([step.dt for traj in trajectories for step in traj.steps]).detach()
         actions_pos = torch.stack([step.action_pos for traj in trajectories for step in traj.steps]).detach()
         actions_cell = torch.stack([step.action_cell for traj in trajectories for step in traj.steps]).detach()
         actions_atoms = torch.stack([step.action_atoms for traj in trajectories for step in traj.steps]).detach()
@@ -772,6 +885,7 @@ class DDPOTrainer:
                 
                 mb_states = [states[j] for j in mb_indices]
                 mb_timesteps = timesteps[mb_indices]
+                mb_dts = dts[mb_indices]
                 mb_actions_pos = actions_pos[mb_indices]
                 mb_actions_cell = actions_cell[mb_indices]
                 mb_actions_atoms = actions_atoms[mb_indices]
@@ -783,6 +897,7 @@ class DDPOTrainer:
                 losses = self.compute_decoupled_ppo_loss(
                     states=mb_states,
                     timesteps=mb_timesteps,
+                    dts=mb_dts,
                     actions_pos=mb_actions_pos,
                     actions_cell=mb_actions_cell,
                     actions_atoms=mb_actions_atoms,
@@ -863,6 +978,7 @@ class DDPOTrainer:
             save_path.mkdir(parents=True, exist_ok=True)
         
         best_reward = float("-inf")
+        global_best_sample_reward = float("-inf")
         
         for epoch in range(num_epochs):
             # Collect trajectories
@@ -894,6 +1010,8 @@ class DDPOTrainer:
                     
             mean_reward = sum(rewards) / len(rewards) if rewards else 0.0
             
+            global_best_sample_reward = max(global_best_sample_reward, best_sample_reward)
+            
             # PPO update
             update_metrics = self.update_step(trajectories)
             
@@ -901,6 +1019,8 @@ class DDPOTrainer:
             epoch_metrics = {
                 "epoch": epoch,
                 "mean_reward": mean_reward,
+                "best_epoch_reward": best_sample_reward,
+                "global_best_reward": global_best_sample_reward,
                 "num_trajectories": len(trajectories),
                 **update_metrics,
             }
