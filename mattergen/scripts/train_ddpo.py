@@ -158,6 +158,12 @@ def main():
         help="Reward function type",
     )
     parser.add_argument(
+        "--num-rollout-batches",
+        type=int,
+        default=1,
+        help="Number of sequential diffusion passes to run per collection epoch. Default is 1 wide batch.",
+    )
+    parser.add_argument(
         "--save-every",
         type=int,
         default=10,
@@ -245,6 +251,8 @@ def main():
         actor_lr=args.actor_lr,
         critic_lr=args.critic_lr,
     )
+    # Add mb_size attribute since it's checked dynamically
+    ddpo_config.ppo_mb_size = getattr(args, "ppo_mb_size", 2)
     
     # Create trainer
     print("Creating DDPOTrainer...")
@@ -278,7 +286,7 @@ def main():
         sampler=sampler,
         condition_loader=condition_loader,
         num_epochs=args.num_epochs,
-        trajectories_per_epoch=args.batch_size,
+        num_diffusion_batches=getattr(args, "num_rollout_batches", 1),
         save_path=output_path,
         save_every=args.save_every,
     )

@@ -599,7 +599,7 @@ class DDPOTrainer:
         self,
         sampler,
         condition_loader,
-        num_trajectories: int = 4,
+        num_diffusion_batches: int = 1,
     ) -> list[Trajectory]:
         """
         Collect trajectories by running the diffusion sampling process using the Actor policy.
@@ -618,7 +618,7 @@ class DDPOTrainer:
         # Trajectories are fully detached.
         trajectories = []
         with torch.no_grad():
-            for _ in range(num_trajectories):
+            for _ in range(num_diffusion_batches):
                 conditioning_data, mask = next(iter(condition_loader))
                 conditioning_data = conditioning_data.to(self.device)
                 
@@ -805,10 +805,16 @@ class DDPOTrainer:
         entropy_bonus = -cfg.entropy_coeff * entropy_disc.mean()
         
         # ==== Value Loss ====
-        values = torch.stack([
-            self.critic(state, t).squeeze(-1) if self.critic(state, t).dim() > 1 else self.critic(state, t)
-            for state, t in zip(states, timesteps)
-        ])
+        # GemNet evaluation is extremely memory intensive.
+        # Instead of stacking all MB graphs simultaneously, we evaluate them sequentially.
+        values_list = []
+        for state, t in zip(states, timesteps):
+            t_expand = t.unsqueeze(0) if t.dim() == 0 else t
+            val = self.critic(state, t_expand)
+            val = val.squeeze(-1) if val.dim() > 1 else val
+            values_list.append(val)
+        
+        values = torch.stack(values_list) if len(values_list) > 0 else torch.tensor([], device=loss_cont.device)
         value_loss = F.mse_loss(values, returns)
         
         # ==== Total Loss ====
@@ -869,8 +875,8 @@ class DDPOTrainer:
         if advantages.std() > 1e-6:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
-        # Minibatch settings
-        minibatch_size = 16
+        # Minibatch settings (drastically reduced to tightly protect VRAM during GemNet backward passes)
+        minibatch_size = getattr(self.config, "ppo_mb_size", 2)
         num_samples = len(states)
         
         # K epochs of PPO updates
@@ -957,7 +963,7 @@ class DDPOTrainer:
         sampler,
         condition_loader,
         num_epochs: int = 100,
-        trajectories_per_epoch: int = 4,
+        num_diffusion_batches: int = 1,
         save_path: Path | None = None,
         save_every: int = 10,
     ) -> list[dict]:
@@ -967,7 +973,7 @@ class DDPOTrainer:
         #     sampler: PredictorCorrector sampler for trajectory collection
         #     condition_loader: Data loader for conditioning data
         #     num_epochs: Number of training epochs
-        #     trajectories_per_epoch: Trajectories to collect per epoch
+        #     num_diffusion_batches: Number of independent diffusion generation passes
         #     save_path: Directory to save checkpoints
         #     save_every: Save checkpoint every N epochs
         #
@@ -980,12 +986,14 @@ class DDPOTrainer:
         best_reward = float("-inf")
         global_best_sample_reward = float("-inf")
         
+        import time
         for epoch in range(num_epochs):
+            epoch_start_time = time.time()
             # Collect trajectories
             trajectories = self.collect_trajectories(
                 sampler=sampler,
                 condition_loader=condition_loader,
-                num_trajectories=trajectories_per_epoch,
+                num_diffusion_batches=num_diffusion_batches,
             )
             
             if len(trajectories) == 0:
@@ -1015,9 +1023,12 @@ class DDPOTrainer:
             # PPO update
             update_metrics = self.update_step(trajectories)
             
+            epoch_time = time.time() - epoch_start_time
+            
             # Log metrics
             epoch_metrics = {
                 "epoch": epoch,
+                "epoch_time_seconds": epoch_time,
                 "mean_reward": mean_reward,
                 "best_epoch_reward": best_sample_reward,
                 "global_best_reward": global_best_sample_reward,
@@ -1029,6 +1040,7 @@ class DDPOTrainer:
             print(
                 f"Epoch {epoch:4d} | "
                 f"Reward: {mean_reward:7.2f} | "
+                f"Time: {epoch_time:5.1f}s | "
                 f"Loss Cont: {update_metrics.get('loss_cont', 0):.4f} | "
                 f"Loss Disc: {update_metrics.get('loss_disc', 0):.4f} | "
                 f"KL: {update_metrics.get('kl_disc', 0):.4f}"
