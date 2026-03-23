@@ -50,11 +50,18 @@ class DDPOConfig:
     
     # Numerical stability
     prob_clamp_min: float = 1e-6
-    prob_clamp_max: float = 1.0 - 1e-6
+    # NOTE: no prob_clamp_max — continuous log-probs can be positive.
     grad_clip_norm: float = 1.0
-    
+
+    # Performance: fraction of diffusion timesteps to sample per PPO update epoch.
+    # With N=100 steps, 0.2 → 20 steps used → ~5x faster updates with negligible quality loss.
+    timestep_subsample_frac: float = 0.2
+
+    # Minibatch size (number of timestep-steps) per gradient update
+    ppo_mb_size: int = 4
+
     # Learning rates
-    actor_lr: float = 1e-5
+    actor_lr: float = 1e-4
     critic_lr: float = 1e-4
 
 
@@ -123,9 +130,9 @@ class MatterGenActor(nn.Module):
         # Apply LoRA layers ONLY to specific subsets to save VRAM on 8GB cards
         # We target the final projection heads rather than intermediate embeddings
         self.denoiser = apply_lora(
-            denoiser, 
-            rank=4, 
-            alpha=4.0, 
+            denoiser,
+            rank=16,
+            alpha=16.0,
             target_modules=["fc_atom", "out_energy", "out_forces"]
         )
         
@@ -269,10 +276,9 @@ class MatterGenActor(nn.Module):
             lp_cell = dist_cell.log_prob(step_actions_cell).sum(dim=(1, 2))
             log_prob_cont = lp_pos + lp_cell
             
-            # Clamp for numerical stability
+            # Only clamp the lower bound (see sample_action for rationale).
             log_prob_cont = log_prob_cont.clamp(
                 min=torch.log(torch.tensor(config.prob_clamp_min, device=log_prob_cont.device)),
-                max=torch.log(torch.tensor(config.prob_clamp_max, device=log_prob_cont.device)),
             )
             
             # Discrete distribution (atom types)
@@ -290,7 +296,7 @@ class MatterGenActor(nn.Module):
             lp_atoms = dist_atoms.log_prob(atoms_0_idx)
             log_prob_disc = scatter(lp_atoms, batch_idx_pos, dim=0, reduce="sum").clamp(
                 min=torch.log(torch.tensor(config.prob_clamp_min, device=lp_atoms.device)),
-                max=torch.log(torch.tensor(config.prob_clamp_max, device=lp_atoms.device)),
+                max=-1e-6,  # log(1 - 1e-6); discrete log-probs are always ≤ 0
             )
             
             entropy_atoms = dist_atoms.entropy()
@@ -359,9 +365,11 @@ class MatterGenActor(nn.Module):
         
         log_prob_cell = dist_cell.log_prob(action_cell).sum(dim=(1, 2))
         
+        # Only clamp the lower bound: continuous log-probs can legitimately be positive
+        # (probability density > 1 for tight Gaussians near t=0). Clamping the upper
+        # bound to log(1-1e-6)≈0 would zero-out the PPO signal for low-noise steps.
         log_prob_cont = (log_prob_pos + log_prob_cell).clamp(
             min=torch.log(torch.tensor(config.prob_clamp_min, device=log_prob_pos.device)),
-            max=torch.log(torch.tensor(config.prob_clamp_max, device=log_prob_pos.device)),
         )
         
         # Sample from discrete distribution
@@ -380,7 +388,7 @@ class MatterGenActor(nn.Module):
         lp_atoms = dist_atoms.log_prob(action_atoms_0nd)
         log_prob_disc = scatter(lp_atoms, batch_idx_pos, dim=0, reduce="sum").clamp(
             min=torch.log(torch.tensor(config.prob_clamp_min, device=action_atoms.device)),
-            max=torch.log(torch.tensor(config.prob_clamp_max, device=action_atoms.device)),
+            max=-1e-6,  # log(1 - 1e-6); discrete log-probs are always ≤ 0
         )
         
         # Wrap pos correctly so the next state lies in [0, 1] without breaking gradient graphs
@@ -530,15 +538,23 @@ class ValueNetwork(nn.Module):
         # Load compatible weights
         state_dict = ckpt.get("model_state_dict", ckpt)
         
-        # Filter to only load GemNet and noise_level_encoding weights
+        # Filter to only load GemNet and noise_level_encoding weights.
+        # The classifier applies LoRA to every Linear in GemNet, which renames
+        # "gemnet.xxx.weight" → "gemnet.xxx.base_layer.weight". ValueNetwork has
+        # a plain GemNet (no LoRA), so we strip the ".base_layer" infix and skip
+        # the LoRA-specific keys (lora_A / lora_B) entirely.
         filtered_state_dict = {}
         for key, value in state_dict.items():
-            if key.startswith("gemnet.") or key.startswith("noise_level_encoding."):
-                filtered_state_dict[key] = value
-        
+            if not (key.startswith("gemnet.") or key.startswith("noise_level_encoding.")):
+                continue
+            if ".lora_A." in key or ".lora_B." in key:
+                continue  # LoRA adapter weights — no matching layer in ValueNetwork
+            remapped = key.replace(".base_layer.", ".")
+            filtered_state_dict[remapped] = value
+
         missing, unexpected = model.load_state_dict(filtered_state_dict, strict=False)
         print(f"ValueNetwork loaded from {checkpoint_path}")
-        print(f"  Missing keys (expected, new head): {len(missing)}")
+        print(f"  Missing keys (should be ~6 head params only): {len(missing)}")
         print(f"  Loaded keys: {len(filtered_state_dict)}")
         
         return model.to(device)
@@ -660,17 +676,22 @@ class DDPOTrainer:
                                 state_updates = {k: v[0] for k, v in samples_means.items()}
                                 state = state.replace(**state_updates)
                                     
-                        # Sample action from the current actor policy (on CPU)
+                        # Record the pre-action state so (state, timestep) is a matched pair.
+                        # The critic predicts V(x_t, t); storing next_state here would give
+                        # V(x_{t-1}, t) — a less-noisy structure at the wrong noise level.
+                        prev_state = state.clone()
+
+                        # Sample action from the current actor policy
                         next_state, action_pos, action_cell, action_atoms, lp_cont, lp_disc, mean_state = self.actor.sample_action(
                             state, t, dt, self.config
                         )
-                        
-                        # Use the sampled actions to manually step the external state
-                        state = next_state         
-                        
-                        # Record the step (clone everything to prevent mutating detached states)
+
+                        # Advance the rollout state
+                        state = next_state
+
+                        # Record the step
                         steps.append(TrajectoryStep(
-                            state=state.clone(),
+                            state=prev_state,
                             timestep=t.clone(),
                             action_pos=action_pos.clone(),
                             action_cell=action_cell.clone(),
@@ -874,10 +895,30 @@ class DDPOTrainer:
         # Normalize advantages (variance reduction)
         if advantages.std() > 1e-6:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        
-        # Minibatch settings (drastically reduced to tightly protect VRAM during GemNet backward passes)
-        minibatch_size = getattr(self.config, "ppo_mb_size", 2)
+
         num_samples = len(states)
+
+        # Subsample a fraction of timesteps per PPO epoch to reduce the number of
+        # expensive GemNet forward passes. With N=100 steps and frac=0.2 we use 20
+        # steps instead of 100, giving ~5x faster updates per epoch.
+        subsample_frac = self.config.timestep_subsample_frac
+        subsample_n = max(self.config.ppo_mb_size, int(num_samples * subsample_frac))
+        if subsample_n < num_samples:
+            sub_idx = torch.randperm(num_samples, device=self.device)[:subsample_n]
+            sub_idx_list = sub_idx.tolist()
+            states = [states[j] for j in sub_idx_list]
+            timesteps = timesteps[sub_idx]
+            dts = dts[sub_idx]
+            actions_pos = actions_pos[sub_idx]
+            actions_cell = actions_cell[sub_idx]
+            actions_atoms = actions_atoms[sub_idx]
+            old_log_probs_cont = old_log_probs_cont[sub_idx]
+            old_log_probs_disc = old_log_probs_disc[sub_idx]
+            advantages = advantages[sub_idx]
+            returns = returns[sub_idx]
+            num_samples = len(states)
+
+        minibatch_size = self.config.ppo_mb_size
         
         # K epochs of PPO updates
         epoch_metrics = []
@@ -1037,13 +1078,20 @@ class DDPOTrainer:
             }
             self.metrics_history.append(epoch_metrics)
             
+            recent = self.metrics_history[-10:]
+            rolling_mean = sum(m["mean_reward"] for m in recent) / len(recent)
+            # Plateau: global best hasn't improved in the last 30 epochs
+            window = self.metrics_history[-30:]
+            plateau_flag = (
+                len(window) == 30
+                and window[-1]["global_best_reward"] <= window[0]["global_best_reward"]
+            )
             print(
                 f"Epoch {epoch:4d} | "
-                f"Reward: {mean_reward:7.2f} | "
-                f"Time: {epoch_time:5.1f}s | "
-                f"Loss Cont: {update_metrics.get('loss_cont', 0):.4f} | "
-                f"Loss Disc: {update_metrics.get('loss_disc', 0):.4f} | "
+                f"Reward: {mean_reward:7.2f} (avg10: {rolling_mean:7.2f}) | "
+                f"Best: {global_best_sample_reward:7.2f} | "
                 f"KL: {update_metrics.get('kl_disc', 0):.4f}"
+                + (" [PLATEAU]" if plateau_flag else "")
             )
             
             # Save metrics to disk per epoch for plotting

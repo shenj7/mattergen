@@ -52,7 +52,7 @@ def create_reward_fn(reward_net, device: torch.device):
     """
     Create a reward function using the frozen BulkModulusLoRAMLPTimePredictor.
     Evaluates x_0 at t=0 to predict final bulk modulus.
-    
+
     Returns:
         Callable that takes a ChemGraph and returns a (batch_size,) Tensor
     """
@@ -60,19 +60,101 @@ def create_reward_fn(reward_net, device: torch.device):
         from mattergen.common.data.transform import symmetrize_lattice
         with torch.no_grad():
             t = torch.zeros((x_0.get_batch_size(),), device=device)
-            
+
             # Wrap to periodic cell bounds
             x_eval = x_0.clone()
             x_eval = x_eval.replace(pos=x_eval.pos % 1.0)
-            
+
             # Reconstruct symmetric matrix based on primitive cell lengths + angles
             x_eval = symmetrize_lattice(x_eval)
-            
+
             # Evaluate the bulk modulus for the batch
             # Shape is (batch_size,)
             mu, logvar = reward_net(x_eval, t)
             return mu
-            
+
+    return reward_fn
+
+
+def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: float = 0.03):
+    """
+    Create a reward function using MatterSim force field + E(V) curve fitting.
+
+    For each crystal in the batch: converts ChemGraph → ASE Atoms, samples
+    n_points volumes spanning ±strain, fits a quadratic E(V) curve, and returns
+    the bulk modulus B = V0 * d²E/dV² in GPa.
+
+    Uses a single shared MatterSimCalculator (loaded once) to avoid reloading the
+    1M-parameter model on every call. Energy evaluations run inside torch.enable_grad()
+    because MatterSim computes forces via autograd internally and will fail if called
+    from inside a torch.no_grad() context.
+
+    Returns:
+        Callable that takes a ChemGraph and returns a (batch_size,) Tensor
+    """
+    import numpy as np
+    from ase import Atoms as AseAtoms
+    from mattersim.forcefield import MatterSimCalculator
+    from calc_bulk_modulus_single import _fit_bulk_modulus
+
+    print("Loading MatterSim calculator (once)...")
+    shared_calc = MatterSimCalculator()
+
+    vol_scales = np.linspace(1.0 - strain, 1.0 + strain, n_points)
+    len_scales = vol_scales ** (1.0 / 3.0)
+
+    def _eval_one(atoms: AseAtoms) -> float:
+        """E(V) sweep + quadratic fit for a single structure."""
+        atoms = atoms.copy()
+        atoms.calc = shared_calc
+        base_cell = atoms.get_cell().array.copy()
+        base_pos = atoms.get_positions().copy()
+        ev_rows = []
+        for scale in len_scales:
+            atoms.set_cell(base_cell * scale, scale_atoms=False)
+            atoms.set_positions(base_pos * scale)
+            # MatterSim uses autograd internally to compute forces, so we need
+            # gradient tracking even though we only read the energy scalar.
+            with torch.enable_grad():
+                E = float(atoms.get_potential_energy())
+            V = float(atoms.get_volume())
+            ev_rows.append((V, E))
+        return _fit_bulk_modulus(ev_rows)
+
+    def reward_fn(x_0: ChemGraph) -> torch.Tensor:
+        from mattergen.common.data.transform import symmetrize_lattice
+
+        # Same preprocessing as the neural-net reward
+        x_eval = x_0.clone()
+        x_eval = x_eval.replace(pos=x_eval.pos % 1.0)
+        x_eval = symmetrize_lattice(x_eval)
+
+        batch_size = x_eval.get_batch_size()
+        batch_idx = x_eval.get_batch_idx("pos").cpu()
+        frac_coords = x_eval["pos"].detach().cpu().numpy()      # (total_atoms, 3) fractional
+        atomic_numbers = x_eval["atomic_numbers"].detach().cpu().numpy()  # (total_atoms,)
+        cells = x_eval["cell"].detach().cpu().numpy()           # (batch_size, 3, 3)
+
+        rewards = []
+        for i in range(batch_size):
+            mask = (batch_idx == i).numpy()
+            atoms = AseAtoms(
+                numbers=atomic_numbers[mask],
+                cell=cells[i],
+                scaled_positions=frac_coords[mask],
+                pbc=True,
+            )
+            try:
+                bm = _eval_one(atoms)
+                # Clip to physically plausible range (diamond ~440 GPa is upper bound)
+                bm = max(0.0, min(float(bm), 500.0))
+            except Exception as e:
+                print(f"  MatterSim reward failed for crystal {i}: {e}")
+                bm = 0.0
+            rewards.append(bm)
+
+        return torch.tensor(rewards, dtype=torch.float32, device=device)
+
     return reward_fn
 
 
@@ -117,7 +199,7 @@ def main():
     parser.add_argument(
         "--actor-lr",
         type=float,
-        default=1e-5,
+        default=1e-4,
         help="Actor learning rate",
     )
     parser.add_argument(
@@ -154,8 +236,20 @@ def main():
         "--reward-type",
         type=str,
         default="bulk_modulus",
-        choices=["bulk_modulus", "simple_density"],
-        help="Reward function type",
+        choices=["bulk_modulus", "simple_density", "mattersim"],
+        help="Reward function type. 'mattersim' uses MatterSim + E(V) curve fitting (slow but accurate).",
+    )
+    parser.add_argument(
+        "--mattersim-n-points",
+        type=int,
+        default=5,
+        help="Number of volume-strain points for MatterSim E(V) fit (only used with --reward-type mattersim)",
+    )
+    parser.add_argument(
+        "--mattersim-strain",
+        type=float,
+        default=0.03,
+        help="Max volumetric strain fraction for MatterSim E(V) fit (only used with --reward-type mattersim)",
     )
     parser.add_argument(
         "--num-rollout-batches",
@@ -210,16 +304,17 @@ def main():
     if critic_path.exists():
         print(f"Loading critic from: {critic_path}")
         critic = ValueNetwork.from_classifier_checkpoint(critic_path, device=device)
-        
-        print(f"Loading frozen reward network from: {critic_path}")
-        reward_net = BulkModulusLoRAMLPTimePredictor.from_checkpoint(critic_path, device=device)
-        reward_net.eval()
-        for param in reward_net.parameters():
-            param.requires_grad = False
     else:
         print("Critic checkpoint not found, creating from scratch")
         critic = ValueNetwork(hidden_dim=512, mlp_hidden_dim=256)
-        reward_net = BulkModulusLoRAMLPTimePredictor(hidden_dim=512, mlp_hidden_dim=256).to(device)
+
+    # Load frozen reward network only when using the neural-net reward
+    if args.reward_type != "mattersim":
+        if critic_path.exists():
+            print(f"Loading frozen reward network from: {critic_path}")
+            reward_net = BulkModulusLoRAMLPTimePredictor.from_checkpoint(critic_path, device=device)
+        else:
+            reward_net = BulkModulusLoRAMLPTimePredictor(hidden_dim=512, mlp_hidden_dim=256).to(device)
         reward_net.eval()
         for param in reward_net.parameters():
             param.requires_grad = False
@@ -239,7 +334,15 @@ def main():
     sampler = sampler_partial(pl_module=model)
     
     # Create reward function
-    reward_fn = create_reward_fn(reward_net, device=device)
+    if args.reward_type == "mattersim":
+        print(f"Using MatterSim reward (n_points={args.mattersim_n_points}, strain={args.mattersim_strain})")
+        reward_fn = create_mattersim_reward_fn(
+            device=device,
+            n_points=args.mattersim_n_points,
+            strain=args.mattersim_strain,
+        )
+    else:
+        reward_fn = create_reward_fn(reward_net, device=device)
     
     # Create DDPO config
     ddpo_config = DDPOConfig(
@@ -251,8 +354,7 @@ def main():
         actor_lr=args.actor_lr,
         critic_lr=args.critic_lr,
     )
-    # Add mb_size attribute since it's checked dynamically
-    ddpo_config.ppo_mb_size = getattr(args, "ppo_mb_size", 2)
+    # ppo_mb_size is now a proper DDPOConfig field (default 4)
     
     # Create trainer
     print("Creating DDPOTrainer...")
