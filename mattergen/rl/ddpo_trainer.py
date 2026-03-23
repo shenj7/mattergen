@@ -632,21 +632,25 @@ class DDPOTrainer:
         
         # We don't want to track gradients during rollout to save memory.
         # Trajectories are fully detached.
+        import time as _time
         trajectories = []
+        _t_diffusion = 0.0
+        _t_reward = 0.0
         with torch.no_grad():
             for _ in range(num_diffusion_batches):
                 conditioning_data, mask = next(iter(condition_loader))
                 conditioning_data = conditioning_data.to(self.device)
-                
+
                 try:
                     # Get prior initial state based on conditioning data
                     from mattergen.diffusion.sampling.pc_sampler import _sample_prior
                     state = _sample_prior(sampler._multi_corruption, conditioning_data, mask=None)
-                    
+
                     timesteps = torch.linspace(sampler._max_t, sampler._eps_t, sampler.N, device=self.device)
                     dt_scalar = -torch.tensor((sampler._max_t - sampler._eps_t) / (sampler.N - 1)).to(self.device)
-                    
+
                     steps = []
+                    _t0 = _time.time()
                     # Rollout from T to 0
                     for i in range(sampler.N):
                         t_val = timesteps[i]
@@ -701,26 +705,31 @@ class DDPOTrainer:
                             dt=dt.clone(),
                         ))
                         
+                    _t_diffusion += _time.time() - _t0
+
                     # Final sample x_0
                     sample = mean_state
-                    
+
                     # Compute terminal reward using x_0 and t=0 inside reward_fn
+                    _t1 = _time.time()
                     reward = self.reward_fn(sample)
-                    
+                    _t_reward += _time.time() - _t1
+
                     # Create trajectory
                     traj = Trajectory(
-                        steps=steps, 
+                        steps=steps,
                         final_sample=sample,
                         reward=reward,
                     )
                     trajectories.append(traj)
-                    
+
                 except Exception as e:
                     print(f"Trajectory collection failed: {e}")
                     import traceback
                     traceback.print_exc()
                     continue
-        
+
+        print(f"  [timing] diffusion: {_t_diffusion:.1f}s | reward: {_t_reward:.1f}s")
         return trajectories
     
     def compute_advantages(
@@ -1060,10 +1069,12 @@ class DDPOTrainer:
             mean_reward = sum(rewards) / len(rewards) if rewards else 0.0
             
             global_best_sample_reward = max(global_best_sample_reward, best_sample_reward)
-            
+
             # PPO update
+            _t_ppo = time.time()
             update_metrics = self.update_step(trajectories)
-            
+            _ppo_time = time.time() - _t_ppo
+
             epoch_time = time.time() - epoch_start_time
             
             # Log metrics
@@ -1090,7 +1101,8 @@ class DDPOTrainer:
                 f"Epoch {epoch:4d} | "
                 f"Reward: {mean_reward:7.2f} (avg10: {rolling_mean:7.2f}) | "
                 f"Best: {global_best_sample_reward:7.2f} | "
-                f"KL: {update_metrics.get('kl_disc', 0):.4f}"
+                f"KL: {update_metrics.get('kl_disc', 0):.4f} | "
+                f"Time: {epoch_time:.0f}s (ppo: {_ppo_time:.0f}s)"
                 + (" [PLATEAU]" if plateau_flag else "")
             )
             
