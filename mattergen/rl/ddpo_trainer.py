@@ -561,6 +561,41 @@ class ValueNetwork(nn.Module):
 
 
 # =============================================================================
+# Helpers
+# =============================================================================
+
+def _cat_chemgraph_states(states: list) -> "ChemGraph":
+    """Concatenate a list of batched ChemGraphs into a single mega-batch.
+
+    Each element is already a batched ChemGraph (e.g. 128 crystals). The result
+    has len(states) * batch_size crystals with corrected batch indices so GemNet
+    treats every crystal independently — identical to what a DataLoader would
+    produce for a single larger batch.
+    """
+    offset = 0
+    all_pos, all_atomic, all_cells, all_num_atoms, all_batch = [], [], [], [], []
+
+    for state in states:
+        batch_idx = state.batch          # (total_atoms,)  per-atom graph index
+        n_graphs = state["cell"].shape[0]
+
+        all_pos.append(state["pos"])
+        all_atomic.append(state["atomic_numbers"])
+        all_cells.append(state["cell"])
+        all_num_atoms.append(state["num_atoms"])
+        all_batch.append(batch_idx + offset)
+        offset += n_graphs
+
+    return states[0].replace(
+        pos=torch.cat(all_pos, dim=0),
+        atomic_numbers=torch.cat(all_atomic, dim=0),
+        cell=torch.cat(all_cells, dim=0),
+        num_atoms=torch.cat(all_num_atoms, dim=0),
+        batch=torch.cat(all_batch, dim=0),
+    )
+
+
+# =============================================================================
 # DDPOTrainer: Main Training Loop
 # =============================================================================
 
@@ -609,7 +644,17 @@ class DDPOTrainer:
         
         # Metrics tracking
         self.metrics_history: list[dict] = []
-        
+
+        # Mixed-precision scaler for PPO backward passes
+        self.scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
+
+        # torch.compile: fuses GemNet kernels, ~10-30% faster per forward pass.
+        # dynamic=True avoids recompilation when atom counts change between crystals.
+        if torch.cuda.is_available():
+            self.actor = torch.compile(self.actor, dynamic=True)
+            self.critic = torch.compile(self.critic, dynamic=True)
+            self.ref_actor = torch.compile(self.ref_actor, dynamic=True)
+
     @torch.no_grad()
     def collect_trajectories(
         self,
@@ -835,16 +880,12 @@ class DDPOTrainer:
         entropy_bonus = -cfg.entropy_coeff * entropy_disc.mean()
         
         # ==== Value Loss ====
-        # GemNet evaluation is extremely memory intensive.
-        # Instead of stacking all MB graphs simultaneously, we evaluate them sequentially.
-        values_list = []
-        for state, t in zip(states, timesteps):
-            t_expand = t.unsqueeze(0) if t.dim() == 0 else t
-            val = self.critic(state, t_expand)
-            val = val.squeeze(-1) if val.dim() > 1 else val
-            values_list.append(val)
-        
-        values = torch.stack(values_list) if len(values_list) > 0 else torch.tensor([], device=loss_cont.device)
+        # Concatenate all minibatch states into a single mega-batch so GemNet
+        # runs once instead of ppo_mb_size times sequentially.
+        mega_state = _cat_chemgraph_states(states)
+        mega_t = timesteps.reshape(-1)  # (ppo_mb_size * batch_size,)
+        values_flat = self.critic(mega_state, mega_t)
+        values = values_flat.view(len(states), -1)  # (ppo_mb_size, batch_size)
         value_loss = F.mse_loss(values, returns)
         
         # ==== Total Loss ====
@@ -877,9 +918,7 @@ class DDPOTrainer:
         self.actor.train()
         self.critic.train()
         
-        # Extract states manually since they are BatchedData (ChemGraph)
-        # We process them batch-wise using `evaluate_actions` which properly handles ChemGraphs.
-        # Ensure all captured data is completely detached before moving forward to avoid graph retention properly.
+        # Extract states — fully detached, no grad retention needed.
         states = [step.state for traj in trajectories for step in traj.steps]
         timesteps = torch.stack([step.timestep for traj in trajectories for step in traj.steps]).detach()
         dts = torch.stack([step.dt for traj in trajectories for step in traj.steps]).detach()
@@ -888,28 +927,26 @@ class DDPOTrainer:
         actions_atoms = torch.stack([step.action_atoms for traj in trajectories for step in traj.steps]).detach()
         old_log_probs_cont = torch.stack([step.log_prob_cont for traj in trajectories for step in traj.steps]).detach()
         old_log_probs_disc = torch.stack([step.log_prob_disc for traj in trajectories for step in traj.steps]).detach()
-        
+
         if len(states) == 0:
             return {"error": "No valid trajectory steps"}
-        
-        # Compute advantages WITHOUT gradients.
-        with torch.no_grad():
-            advantages_list, returns_list = self.compute_advantages(trajectories)
-            if len(advantages_list) == 0:
-                return {"error": "No advantages computed"}
-                
-            advantages = torch.stack(advantages_list).to(self.device).detach()
-            returns = torch.stack(returns_list).to(self.device).detach()
-        
-        # Normalize advantages (variance reduction)
-        if advantages.std() > 1e-6:
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        # Build returns WITHOUT critic: terminal-reward RL means return = final
+        # reward for every step in the trajectory. No GemNet call needed here.
+        returns_list = []
+        for traj in trajectories:
+            if traj.final_sample is not None:
+                reward = torch.as_tensor(traj.reward, dtype=torch.float32, device=self.device)
+                for _ in traj.steps:
+                    returns_list.append(reward)
+        if not returns_list:
+            return {"error": "No valid trajectory steps"}
+        returns = torch.stack(returns_list).to(self.device).detach()  # (num_steps, batch_size)
 
         num_samples = len(states)
 
-        # Subsample a fraction of timesteps per PPO epoch to reduce the number of
-        # expensive GemNet forward passes. With N=100 steps and frac=0.2 we use 20
-        # steps instead of 100, giving ~5x faster updates per epoch.
+        # Subsample BEFORE computing advantages so the critic only runs on the
+        # steps we actually use — 5x fewer critic calls vs. sampling after.
         subsample_frac = self.config.timestep_subsample_frac
         subsample_n = max(self.config.ppo_mb_size, int(num_samples * subsample_frac))
         if subsample_n < num_samples:
@@ -923,22 +960,36 @@ class DDPOTrainer:
             actions_atoms = actions_atoms[sub_idx]
             old_log_probs_cont = old_log_probs_cont[sub_idx]
             old_log_probs_disc = old_log_probs_disc[sub_idx]
-            advantages = advantages[sub_idx]
             returns = returns[sub_idx]
             num_samples = len(states)
 
+        # Compute advantages with a SINGLE batched critic call (no_grad, so no
+        # activation storage — concatenating all subsampled states is cheap).
+        with torch.no_grad():
+            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                mega_state = _cat_chemgraph_states(states)
+                mega_t = timesteps.reshape(-1)
+                values_flat = self.critic(mega_state, mega_t)
+            values = values_flat.view(num_samples, -1).detach()  # (subsample_n, batch_size)
+
+        advantages = (returns - values).detach()
+
+        # Normalize advantages (variance reduction)
+        if advantages.std() > 1e-6:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
         minibatch_size = self.config.ppo_mb_size
-        
+
         # K epochs of PPO updates
         epoch_metrics = []
         for _ in range(self.config.ppo_epochs):
             indices = torch.randperm(num_samples)
             batch_losses = []
-            
+
             for start_idx in range(0, num_samples, minibatch_size):
                 end_idx = min(start_idx + minibatch_size, num_samples)
                 mb_indices = indices[start_idx:end_idx].tolist()
-                
+
                 mb_states = [states[j] for j in mb_indices]
                 mb_timesteps = timesteps[mb_indices]
                 mb_dts = dts[mb_indices]
@@ -949,47 +1000,54 @@ class DDPOTrainer:
                 mb_old_log_probs_disc = old_log_probs_disc[mb_indices]
                 mb_advantages = advantages[mb_indices]
                 mb_returns = returns[mb_indices]
-                
-                losses = self.compute_decoupled_ppo_loss(
-                    states=mb_states,
-                    timesteps=mb_timesteps,
-                    dts=mb_dts,
-                    actions_pos=mb_actions_pos,
-                    actions_cell=mb_actions_cell,
-                    actions_atoms=mb_actions_atoms,
-                    old_log_probs_cont=mb_old_log_probs_cont,
-                    old_log_probs_disc=mb_old_log_probs_disc,
-                    advantages=mb_advantages,
-                    returns=mb_returns,
-                )
-                
-                # Check for NaN
+
+                # AMP: forward pass in fp16 where safe, backward handled by scaler
+                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                    losses = self.compute_decoupled_ppo_loss(
+                        states=mb_states,
+                        timesteps=mb_timesteps,
+                        dts=mb_dts,
+                        actions_pos=mb_actions_pos,
+                        actions_cell=mb_actions_cell,
+                        actions_atoms=mb_actions_atoms,
+                        old_log_probs_cont=mb_old_log_probs_cont,
+                        old_log_probs_disc=mb_old_log_probs_disc,
+                        advantages=mb_advantages,
+                        returns=mb_returns,
+                    )
+
+                # Check for NaN/Inf (scaler will also skip steps with Inf grads)
                 if torch.isnan(losses["total_loss"]) or torch.isinf(losses["total_loss"]):
                     print("Warning: NaN/Inf loss detected, skipping update")
                     continue
-                
+
                 # Update critic
                 self.critic_optimizer.zero_grad()
                 critic_loss = self.config.value_coeff * losses["value_loss"]
-                critic_loss.backward()
+                self.scaler.scale(critic_loss).backward()
+                self.scaler.unscale_(self.critic_optimizer)
                 torch.nn.utils.clip_grad_norm_(
                     self.critic.parameters(),
                     self.config.grad_clip_norm,
                 )
-                self.critic_optimizer.step()
-                
+                self.scaler.step(self.critic_optimizer)
+
                 # Update actor (LoRA weights only)
                 self.actor_optimizer.zero_grad()
-                actor_loss = (losses["loss_cont"] + losses["loss_disc"] + 
-                              self.config.kl_coeff * losses["kl_disc"] + 
+                actor_loss = (losses["loss_cont"] + losses["loss_disc"] +
+                              self.config.kl_coeff * losses["kl_disc"] +
                               (-self.config.entropy_coeff * losses["entropy"]))
-                actor_loss.backward()
+                self.scaler.scale(actor_loss).backward()
+                self.scaler.unscale_(self.actor_optimizer)
                 torch.nn.utils.clip_grad_norm_(
                     self.actor.parameters(),
                     self.config.grad_clip_norm,
                 )
-                self.actor_optimizer.step()
-                
+                self.scaler.step(self.actor_optimizer)
+
+                # One scaler update per minibatch (covers both optimizer steps)
+                self.scaler.update()
+
                 batch_losses.append({k: v.item() if isinstance(v, torch.Tensor) else v for k, v in losses.items()})
                 
             # Average minibatch losses for this epoch
