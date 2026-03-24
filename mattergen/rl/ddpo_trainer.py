@@ -1054,17 +1054,24 @@ class DDPOTrainer:
             rewards = []
             best_sample = None
             best_sample_reward = float("-inf")
+            best_sample_idx = 0
             for t in trajectories:
                 if t.final_sample is not None:
                     # Handle reward regardless if it's a tensor or float
                     if isinstance(t.reward, torch.Tensor):
-                        rew_val = t.reward.mean().item()
+                        # Track per-crystal rewards for accurate mean and best
+                        crystal_rewards = t.reward.tolist()
+                        rewards.extend(crystal_rewards)
+                        best_idx = int(t.reward.argmax().item())
+                        rew_val = t.reward[best_idx].item()
                     else:
+                        rewards.append(float(t.reward))
+                        best_idx = 0
                         rew_val = float(t.reward)
-                    rewards.append(rew_val)
                     if rew_val > best_sample_reward:
                         best_sample_reward = rew_val
                         best_sample = t.final_sample
+                        best_sample_idx = best_idx
                     
             mean_reward = sum(rewards) / len(rewards) if rewards else 0.0
             
@@ -1135,9 +1142,9 @@ class DDPOTrainer:
                     # Convert best_sample (ChemGraph) to ASE Atoms
                     # Handling the first structure in the batch if best_sample is batched
                     with torch.no_grad():
-                        pos = best_sample["pos"][best_sample.get_batch_idx("pos") == 0].detach().cpu().numpy()
-                        cell = best_sample["cell"][0].detach().cpu().numpy()
-                        atomic_numbers = best_sample["atomic_numbers"][best_sample.get_batch_idx("pos") == 0].detach().cpu().numpy()
+                        pos = best_sample["pos"][best_sample.get_batch_idx("pos") == best_sample_idx].detach().cpu().numpy()
+                        cell = best_sample["cell"][best_sample_idx].detach().cpu().numpy()
+                        atomic_numbers = best_sample["atomic_numbers"][best_sample.get_batch_idx("pos") == best_sample_idx].detach().cpu().numpy()
                         
                         # MatterGen outputs fractional coordinates, convert to Cartesian
                         positions_cart = pos @ cell
