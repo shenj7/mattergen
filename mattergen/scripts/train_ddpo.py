@@ -135,11 +135,23 @@ def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: 
         atomic_numbers = x_eval["atomic_numbers"].detach().cpu().numpy()  # (total_atoms,)
         cells = x_eval["cell"].detach().cpu().numpy()           # (batch_size, 3, 3)
 
+        # MatterSim supports Z=1..94 (max_z=94); its CUDA gather will trigger a
+        # device-side assert (not a catchable Python exception) for any Z >= 95.
+        # Once that fires the whole CUDA device is poisoned — filter first.
+        MATTERSIM_MAX_Z = 94
+
         rewards = []
         for i in range(batch_size):
             mask = (batch_idx == i).numpy()
+            atom_nums = atomic_numbers[mask]
+            if atom_nums.min() <= 0 or atom_nums.max() > MATTERSIM_MAX_Z:
+                import numpy as _np
+                bad = _np.unique(atom_nums[(atom_nums <= 0) | (atom_nums > MATTERSIM_MAX_Z)])
+                print(f"  Skipping crystal {i}: atomic numbers {bad} outside MatterSim range [1,{MATTERSIM_MAX_Z}]")
+                rewards.append(0.0)
+                continue
             atoms = AseAtoms(
-                numbers=atomic_numbers[mask],
+                numbers=atom_nums,
                 cell=cells[i],
                 scaled_positions=frac_coords[mask],
                 pbc=True,
