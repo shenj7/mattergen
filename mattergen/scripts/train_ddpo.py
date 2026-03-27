@@ -80,14 +80,17 @@ def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: 
     """
     Create a reward function using MatterSim force field + E(V) curve fitting.
 
-    For each crystal in the batch: converts ChemGraph → ASE Atoms, samples
-    n_points volumes spanning ±strain, fits a quadratic E(V) curve, and returns
-    the bulk modulus B = V0 * d²E/dV² in GPa.
+    For each crystal in the batch: converts ChemGraph → ASE Atoms, relaxes all
+    valid structures simultaneously with BatchRelaxer (EXPCELLFILTER, variable cell),
+    then sweeps n_points volumes spanning ±strain, fits a quadratic E(V) curve, and
+    returns the bulk modulus B = V0 * d²E/dV² in GPa.
 
-    Uses a single shared MatterSimCalculator (loaded once) to avoid reloading the
-    1M-parameter model on every call. Energy evaluations run inside torch.enable_grad()
-    because MatterSim computes forces via autograd internally and will fail if called
-    from inside a torch.no_grad() context.
+    Two MatterSim objects are loaded once at startup:
+      - Potential + BatchRelaxer: batched variable-cell relaxation (fmax=0.1, steps=50)
+      - MatterSimCalculator:      serial E(V) energy evaluations after relaxation
+
+    Energy evaluations run inside torch.enable_grad() because MatterSim computes
+    forces via autograd internally.
 
     Returns:
         Callable that takes a ChemGraph and returns a (batch_size,) Tensor
@@ -95,27 +98,30 @@ def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: 
     import numpy as np
     from ase import Atoms as AseAtoms
     from mattersim.forcefield import MatterSimCalculator
+    from mattersim.forcefield.potential import Potential
+    from mattersim.applications.batch_relax import BatchRelaxer
     from calc_bulk_modulus_single import _fit_bulk_modulus
 
-    print("Loading MatterSim calculator (once)...")
+    print("Loading MatterSim potential + BatchRelaxer (once)...")
+    potential = Potential.from_checkpoint(device=str(device), load_training_state=False)
+    batch_relaxer = BatchRelaxer(potential=potential, filter="EXPCELLFILTER", fmax=0.1, steps=50)
+
+    print("Loading MatterSim calculator for E(V) sweep (once)...")
     shared_calc = MatterSimCalculator()
 
     vol_scales = np.linspace(1.0 - strain, 1.0 + strain, n_points)
     len_scales = vol_scales ** (1.0 / 3.0)
 
-    def _relax(atoms: AseAtoms) -> AseAtoms:
-        """Partially relax atoms with LBFGS (max 50 steps, fmax=0.1 eV/Å)."""
-        from ase.optimize import LBFGS
-        atoms = atoms.copy()
-        atoms.calc = shared_calc
-        opt = LBFGS(atoms, logfile=None)
+    def _batch_relax(atoms_list: list[AseAtoms]) -> list[AseAtoms]:
+        """Relax a list of structures simultaneously with BatchRelaxer."""
         with torch.enable_grad():
-            opt.run(fmax=0.1, steps=50)
-        return atoms
+            trajectories = batch_relaxer.relax(atoms_list)
+        # trajectories is an ordered dict; take the last frame of each trajectory
+        return [traj[-1] for traj in trajectories.values()]
 
-    def _eval_one(atoms: AseAtoms) -> float:
-        """Relax, then E(V) sweep + quadratic fit for a single structure."""
-        atoms = _relax(atoms)
+    def _ev_sweep(atoms: AseAtoms) -> float:
+        """E(V) sweep + quadratic fit for a single relaxed structure."""
+        atoms = atoms.copy()
         atoms.calc = shared_calc
         base_cell = atoms.get_cell().array.copy()
         base_pos = atoms.get_positions().copy()
@@ -123,8 +129,6 @@ def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: 
         for scale in len_scales:
             atoms.set_cell(base_cell * scale, scale_atoms=False)
             atoms.set_positions(base_pos * scale)
-            # MatterSim uses autograd internally to compute forces, so we need
-            # gradient tracking even though we only read the energy scalar.
             with torch.enable_grad():
                 E = float(atoms.get_potential_energy())
             V = float(atoms.get_volume())
@@ -134,7 +138,6 @@ def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: 
     def reward_fn(x_0: ChemGraph) -> torch.Tensor:
         from mattergen.common.data.transform import symmetrize_lattice
 
-        # Same preprocessing as the neural-net reward
         x_eval = x_0.clone()
         x_eval = x_eval.replace(pos=x_eval.pos % 1.0)
         x_eval = symmetrize_lattice(x_eval)
@@ -145,34 +148,46 @@ def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: 
         atomic_numbers = x_eval["atomic_numbers"].detach().cpu().numpy()  # (total_atoms,)
         cells = x_eval["cell"].detach().cpu().numpy()           # (batch_size, 3, 3)
 
-        # MatterSim supports Z=1..94 (max_z=94); its CUDA gather will trigger a
-        # device-side assert (not a catchable Python exception) for any Z >= 95.
-        # Once that fires the whole CUDA device is poisoned — filter first.
+        # MatterSim supports Z=1..94; its CUDA gather will trigger a device-side
+        # assert (not a catchable Python exception) for any Z >= 95.
         MATTERSIM_MAX_Z = 94
 
-        rewards = []
+        rewards = [0.0] * batch_size
+        valid_indices = []
+        atoms_to_relax = []
+
         for i in range(batch_size):
             mask = (batch_idx == i).numpy()
             atom_nums = atomic_numbers[mask]
             if atom_nums.min() <= 0 or atom_nums.max() > MATTERSIM_MAX_Z:
-                import numpy as _np
-                bad = _np.unique(atom_nums[(atom_nums <= 0) | (atom_nums > MATTERSIM_MAX_Z)])
+                bad = np.unique(atom_nums[(atom_nums <= 0) | (atom_nums > MATTERSIM_MAX_Z)])
                 print(f"  Skipping crystal {i}: atomic numbers {bad} outside MatterSim range [1,{MATTERSIM_MAX_Z}]")
-                rewards.append(0.0)
                 continue
-            atoms = AseAtoms(
+            atoms_to_relax.append(AseAtoms(
                 numbers=atom_nums,
                 cell=cells[i],
                 scaled_positions=frac_coords[mask],
                 pbc=True,
-            )
+            ))
+            valid_indices.append(i)
+
+        if not atoms_to_relax:
+            return torch.tensor(rewards, dtype=torch.float32, device=device)
+
+        # Relax all valid structures in one batched GPU pass
+        try:
+            relaxed_list = _batch_relax(atoms_to_relax)
+        except Exception as e:
+            print(f"  BatchRelaxer failed ({e}); using unrelaxed structures")
+            relaxed_list = atoms_to_relax
+
+        # E(V) sweep is still serial (no public batched energy API in MatterSim)
+        for crystal_idx, relaxed_atoms in zip(valid_indices, relaxed_list):
             try:
-                bm = _eval_one(atoms)
-                bm = max(0.0, float(bm))
+                bm = _ev_sweep(relaxed_atoms)
+                rewards[crystal_idx] = max(0.0, float(bm))
             except Exception as e:
-                print(f"  MatterSim reward failed for crystal {i}: {e}")
-                bm = 0.0
-            rewards.append(bm)
+                print(f"  MatterSim reward failed for crystal {crystal_idx}: {e}")
 
         return torch.tensor(rewards, dtype=torch.float32, device=device)
 
