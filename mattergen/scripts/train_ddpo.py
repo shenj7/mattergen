@@ -107,7 +107,7 @@ def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: 
     # fmax=0.1 eV/Å: more lenient than the default (0.05) so partially-relaxed
     # generated structures converge faster. BatchRelaxer runs FIRE until all
     # structures reach fmax — there is no step limit in its API.
-    batch_relaxer = BatchRelaxer(potential=potential, filter="EXPCELLFILTER", fmax=0.1)
+    batch_relaxer = BatchRelaxer(potential=potential, filter="EXPCELLFILTER", fmax=0.1, max_natoms_per_batch=2048)
 
     print("Loading MatterSim calculator for E(V) sweep (once)...")
     shared_calc = MatterSimCalculator()
