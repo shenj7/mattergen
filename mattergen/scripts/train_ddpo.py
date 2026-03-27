@@ -104,7 +104,7 @@ def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: 
 
     print("Loading MatterSim potential + BatchRelaxer (once)...")
     potential = Potential.from_checkpoint(device=str(device), load_training_state=False)
-    batch_relaxer = BatchRelaxer(potential=potential, filter="EXPCELLFILTER", fmax=0.1, steps=50)
+    batch_relaxer = BatchRelaxer(potential=potential, filter="EXPCELLFILTER")
 
     print("Loading MatterSim calculator for E(V) sweep (once)...")
     shared_calc = MatterSimCalculator()
@@ -115,7 +115,7 @@ def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: 
     def _batch_relax(atoms_list: list[AseAtoms]) -> list[AseAtoms]:
         """Relax a list of structures simultaneously with BatchRelaxer."""
         with torch.enable_grad():
-            trajectories = batch_relaxer.relax(atoms_list)
+            trajectories = batch_relaxer.relax(atoms_list, fmax=0.1, steps=50)
         # trajectories is an ordered dict; take the last frame of each trajectory
         return [traj[-1] for traj in trajectories.values()]
 
