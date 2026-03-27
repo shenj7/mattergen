@@ -103,9 +103,19 @@ def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: 
     vol_scales = np.linspace(1.0 - strain, 1.0 + strain, n_points)
     len_scales = vol_scales ** (1.0 / 3.0)
 
-    def _eval_one(atoms: AseAtoms) -> float:
-        """E(V) sweep + quadratic fit for a single structure."""
+    def _relax(atoms: AseAtoms) -> AseAtoms:
+        """Partially relax atoms with LBFGS (max 50 steps, fmax=0.1 eV/Å)."""
+        from ase.optimize import LBFGS
         atoms = atoms.copy()
+        atoms.calc = shared_calc
+        opt = LBFGS(atoms, logfile=None)
+        with torch.enable_grad():
+            opt.run(fmax=0.1, steps=50)
+        return atoms
+
+    def _eval_one(atoms: AseAtoms) -> float:
+        """Relax, then E(V) sweep + quadratic fit for a single structure."""
+        atoms = _relax(atoms)
         atoms.calc = shared_calc
         base_cell = atoms.get_cell().array.copy()
         base_pos = atoms.get_positions().copy()
@@ -158,8 +168,7 @@ def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: 
             )
             try:
                 bm = _eval_one(atoms)
-                # Clip to physically plausible range (diamond ~440 GPa is upper bound)
-                bm = max(0.0, min(float(bm), 500.0))
+                bm = max(0.0, float(bm))
             except Exception as e:
                 print(f"  MatterSim reward failed for crystal {i}: {e}")
                 bm = 0.0
