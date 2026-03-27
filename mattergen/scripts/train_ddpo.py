@@ -76,7 +76,7 @@ def create_reward_fn(reward_net, device: torch.device):
     return reward_fn
 
 
-def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: float = 0.03):
+def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: float = 0.03, relax: bool = True):
     """
     Create a reward function using MatterSim force field + E(V) curve fitting.
 
@@ -102,12 +102,16 @@ def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: 
     from mattersim.applications.batch_relax import BatchRelaxer
     from calc_bulk_modulus_single import _fit_bulk_modulus
 
-    print("Loading MatterSim potential + BatchRelaxer (once)...")
-    potential = Potential.from_checkpoint(device=str(device), load_training_state=False)
-    # fmax=0.1 eV/Å: more lenient than the default (0.05) so partially-relaxed
-    # generated structures converge faster. BatchRelaxer runs FIRE until all
-    # structures reach fmax — there is no step limit in its API.
-    batch_relaxer = BatchRelaxer(potential=potential, filter="EXPCELLFILTER", fmax=0.1, max_natoms_per_batch=2048)
+    if relax:
+        print("Loading MatterSim potential + BatchRelaxer (once)...")
+        potential = Potential.from_checkpoint(device=str(device), load_training_state=False)
+        # fmax=0.1 eV/Å: more lenient than the default (0.05) so partially-relaxed
+        # generated structures converge faster. BatchRelaxer runs FIRE until all
+        # structures reach fmax — there is no step limit in its API.
+        batch_relaxer = BatchRelaxer(potential=potential, filter="EXPCELLFILTER", fmax=0.1, max_natoms_per_batch=2048)
+    else:
+        print("Relaxation disabled; skipping BatchRelaxer init.")
+        batch_relaxer = None
 
     print("Loading MatterSim calculator for E(V) sweep (once)...")
     shared_calc = MatterSimCalculator()
@@ -177,11 +181,14 @@ def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: 
         if not atoms_to_relax:
             return torch.tensor(rewards, dtype=torch.float32, device=device)
 
-        # Relax all valid structures in one batched GPU pass
-        try:
-            relaxed_list = _batch_relax(atoms_to_relax)
-        except Exception as e:
-            print(f"  BatchRelaxer failed ({e}); using unrelaxed structures")
+        # Optionally relax all valid structures in one batched GPU pass
+        if relax:
+            try:
+                relaxed_list = _batch_relax(atoms_to_relax)
+            except Exception as e:
+                print(f"  BatchRelaxer failed ({e}); using unrelaxed structures")
+                relaxed_list = atoms_to_relax
+        else:
             relaxed_list = atoms_to_relax
 
         # E(V) sweep is still serial (no public batched energy API in MatterSim)
@@ -291,6 +298,11 @@ def main():
         help="Max volumetric strain fraction for MatterSim E(V) fit (only used with --reward-type mattersim)",
     )
     parser.add_argument(
+        "--mattersim-no-relax",
+        action="store_true",
+        help="Skip BatchRelaxer relaxation before E(V) sweep (faster but less accurate reward)",
+    )
+    parser.add_argument(
         "--num-rollout-batches",
         type=int,
         default=1,
@@ -379,6 +391,7 @@ def main():
             device=device,
             n_points=args.mattersim_n_points,
             strain=args.mattersim_strain,
+            relax=not args.mattersim_no_relax,
         )
     else:
         reward_fn = create_reward_fn(reward_net, device=device)
