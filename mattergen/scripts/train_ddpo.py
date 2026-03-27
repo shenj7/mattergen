@@ -104,7 +104,10 @@ def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: 
 
     print("Loading MatterSim potential + BatchRelaxer (once)...")
     potential = Potential.from_checkpoint(device=str(device), load_training_state=False)
-    batch_relaxer = BatchRelaxer(potential=potential, filter="EXPCELLFILTER")
+    # fmax=0.1 eV/Å: more lenient than the default (0.05) so partially-relaxed
+    # generated structures converge faster. BatchRelaxer runs FIRE until all
+    # structures reach fmax — there is no step limit in its API.
+    batch_relaxer = BatchRelaxer(potential=potential, filter="EXPCELLFILTER", fmax=0.1)
 
     print("Loading MatterSim calculator for E(V) sweep (once)...")
     shared_calc = MatterSimCalculator()
@@ -113,10 +116,10 @@ def create_mattersim_reward_fn(device: torch.device, n_points: int = 5, strain: 
     len_scales = vol_scales ** (1.0 / 3.0)
 
     def _batch_relax(atoms_list: list[AseAtoms]) -> list[AseAtoms]:
-        """Relax a list of structures simultaneously with BatchRelaxer."""
+        """Relax a list of structures simultaneously with BatchRelaxer (FIRE + EXPCELLFILTER)."""
         with torch.enable_grad():
-            trajectories = batch_relaxer.relax(atoms_list, fmax=0.1, steps=50)
-        # trajectories is an ordered dict; take the last frame of each trajectory
+            trajectories = batch_relaxer.relax(atoms_list)
+        # trajectories is a dict keyed by structure_index; values are per-step Atoms lists
         return [traj[-1] for traj in trajectories.values()]
 
     def _ev_sweep(atoms: AseAtoms) -> float:
