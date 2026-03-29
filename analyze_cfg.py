@@ -13,11 +13,10 @@ Usage:
 
 import argparse
 import sys
-import traceback
+import zipfile
 from pathlib import Path
 
 import numpy as np
-import torch
 from ase.io import read as ase_read
 
 # Reuse existing helpers
@@ -29,40 +28,56 @@ from mattergen.evaluation.utils.relaxation import relax_atoms
 MATTERSIM_MAX_Z = 94
 
 
-def load_cif_files(directory: Path) -> tuple[list, list[Path]]:
-    """Load all CIF files from a directory. Returns (atoms_list, paths)."""
+def load_cif_files(directory: Path) -> tuple[list, list[str]]:
+    """
+    Load CIF files from a directory. Checks for generated_crystals_cif.zip first;
+    falls back to loose *.cif files. Returns (atoms_list, names).
+    """
+    zip_path = directory / "generated_crystals_cif.zip"
+
+    if zip_path.exists():
+        print(f"Found {zip_path.name} — extracting to {directory}...")
+        with zipfile.ZipFile(zip_path) as zf:
+            cif_members = [n for n in zf.namelist() if n.endswith(".cif")]
+            if not cif_members:
+                print("Archive contains no CIF files.")
+                sys.exit(1)
+            zf.extractall(directory)
+        print(f"Extracted {len(cif_members)} CIF file(s).")
+
+    # fallback: loose CIF files in the directory
     cif_paths = sorted(directory.glob("*.cif"))
     if not cif_paths:
-        print(f"No CIF files found in {directory}")
+        print(f"No CIF files or generated_crystals_cif.zip found in {directory}")
         sys.exit(1)
     print(f"Found {len(cif_paths)} CIF file(s) in {directory}")
 
-    atoms_list, valid_paths = [], []
+    atoms_list, names = [], []
     for path in cif_paths:
         try:
             atoms = ase_read(str(path))
             atoms.pbc = True
             atoms_list.append(atoms)
-            valid_paths.append(path)
+            names.append(path.name)
         except Exception as e:
             print(f"  [SKIP] {path.name}: failed to load ({e})")
 
-    return atoms_list, valid_paths
+    return atoms_list, names
 
 
-def filter_valid(atoms_list: list, paths: list[Path]):
+def filter_valid(atoms_list: list, names: list[str]):
     """Remove structures with atomic numbers outside MatterSim range [1, 94]."""
-    valid_atoms, valid_paths, skipped = [], [], []
-    for atoms, path in zip(atoms_list, paths):
+    valid_atoms, valid_names, skipped = [], [], []
+    for atoms, name in zip(atoms_list, names):
         nums = atoms.get_atomic_numbers()
         bad = nums[(nums <= 0) | (nums > MATTERSIM_MAX_Z)]
         if len(bad) > 0:
-            print(f"  [SKIP] {path.name}: atomic numbers {np.unique(bad)} outside MatterSim range")
-            skipped.append(path.name)
+            print(f"  [SKIP] {name}: atomic numbers {np.unique(bad)} outside MatterSim range")
+            skipped.append(name)
         else:
             valid_atoms.append(atoms)
-            valid_paths.append(path)
-    return valid_atoms, valid_paths, skipped
+            valid_names.append(name)
+    return valid_atoms, valid_names, skipped
 
 
 def main():
@@ -103,8 +118,8 @@ def main():
     output_csv = Path(args.output) if args.output else results_dir / "bulk_modulus.csv"
 
     # ── Load ──────────────────────────────────────────────────────────────────
-    atoms_list, paths = load_cif_files(results_dir)
-    atoms_list, paths, skipped_load = filter_valid(atoms_list, paths)
+    atoms_list, names = load_cif_files(results_dir)
+    atoms_list, names, skipped_load = filter_valid(atoms_list, names)
 
     if not atoms_list:
         print("No valid structures to process.")
@@ -129,7 +144,7 @@ def main():
     print("-" * 78)
 
     rows = []
-    for atoms, path in zip(relaxed_list, paths):
+    for atoms, name in zip(relaxed_list, names):
         formula = atoms.get_chemical_formula()
         try:
             bm = calc_bulk_modulus_value(atoms, n_points=args.n_points, strain=args.strain)
@@ -138,12 +153,12 @@ def main():
         except Exception as e:
             bm = float("nan")
             status = f"{'ERROR':>10}"
-            print(f"  {path.name:<43} {formula:<20} {status}  ({e})")
-            rows.append({"file": path.name, "formula": formula, "bulk_modulus_gpa": bm, "error": str(e)})
+            print(f"  {name:<43} {formula:<20} {status}  ({e})")
+            rows.append({"file": name, "formula": formula, "bulk_modulus_gpa": bm, "error": str(e)})
             continue
 
-        print(f"  {path.name:<43} {formula:<20} {status}")
-        rows.append({"file": path.name, "formula": formula, "bulk_modulus_gpa": bm, "error": ""})
+        print(f"  {name:<43} {formula:<20} {status}")
+        rows.append({"file": name, "formula": formula, "bulk_modulus_gpa": bm, "error": ""})
 
     # ── Summary ───────────────────────────────────────────────────────────────
     valid_bms = [r["bulk_modulus_gpa"] for r in rows if not np.isnan(r["bulk_modulus_gpa"])]
