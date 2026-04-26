@@ -48,6 +48,20 @@ from calc_bulk_modulus_single import calc_bulk_modulus_value
 from mattergen.property_predictors.bulk_modulus_time_lora_mlp_predictor import BulkModulusLoRAMLPTimePredictor
 
 
+def wrap_reward_top_k(reward_fn, k: int):
+    """
+    Wrap a reward function so that all structures in the batch receive the
+    mean of the top-k rewards rather than their individual rewards.
+    k=1 gives the batch maximum; k=batch_size gives the batch mean.
+    """
+    def top_k_reward_fn(x_0):
+        rewards = reward_fn(x_0)
+        top_k_vals = torch.topk(rewards, min(k, rewards.shape[0])).values
+        shared = top_k_vals.mean().expand_as(rewards)
+        return shared
+    return top_k_reward_fn
+
+
 def create_reward_fn(reward_net, device: torch.device):
     """
     Create a reward function using the frozen BulkModulusLoRAMLPTimePredictor.
@@ -303,6 +317,13 @@ def main():
         help="Skip BatchRelaxer relaxation before E(V) sweep (faster but less accurate reward)",
     )
     parser.add_argument(
+        "--reward-top-k",
+        type=int,
+        default=None,
+        help="If set, replace per-structure rewards with the mean of the top-k rewards in the batch. "
+             "k=1 gives the batch maximum. Default: per-structure rewards (no aggregation).",
+    )
+    parser.add_argument(
         "--num-rollout-batches",
         type=int,
         default=1,
@@ -395,7 +416,11 @@ def main():
         )
     else:
         reward_fn = create_reward_fn(reward_net, device=device)
-    
+
+    if args.reward_top_k is not None:
+        print(f"Using top-{args.reward_top_k} reward aggregation")
+        reward_fn = wrap_reward_top_k(reward_fn, k=args.reward_top_k)
+
     # Create DDPO config
     ddpo_config = DDPOConfig(
         clip_eps_cont=args.clip_eps_cont,
