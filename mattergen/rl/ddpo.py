@@ -556,64 +556,90 @@ class DDPOTrainer:
         
         return loss.item()
 
-    def train_loop(self, sampler: DDPOSampler, dataloader, num_epochs=10):
+    def save_checkpoint(self, path: "Path | str") -> None:
+        """Save the trained diffusion_module in mattergen-generate compatible format."""
+        import torch
+        torch.save({"state_dict": self.diffusion_module.state_dict()}, path)
+
+    def train_loop(
+        self,
+        sampler: DDPOSampler,
+        dataloader,
+        num_epochs: int = 10,
+        save_path: "Path | str | None" = None,
+        save_every: int = 1,
+    ):
         """
         Main training loop.
+
+        Args:
+            save_path: If provided, saves last.ckpt (and best_model.ckpt) here each
+                       ``save_every`` epochs. Use --model_path=<save_path> with
+                       mattergen-generate to run generation with the trained weights.
+            save_every: Save a checkpoint every this many epochs.
         """
+        from pathlib import Path as _Path
+        import os as _os
+
+        if save_path is not None:
+            save_path = _Path(save_path)
+            _os.makedirs(save_path, exist_ok=True)
+
+        best_mean_reward = float("-inf")
+
         for epoch in range(num_epochs):
             print(f"Epoch {epoch+1}/{num_epochs}")
-            
+
             trajectories = []
-            
+
             # 1. Collect Rollouts
-            # Just one batch for simplicity or loop `config.num_batches_per_epoch`
-            # Create iterator
             data_iter = iter(dataloader)
-            
-            # 1. Collect Rollouts
-            # Just one batch for simplicity or loop `config.num_batches_per_epoch`
+
             for i in range(self.config.num_batches_per_epoch):
                 try:
                     batch = next(data_iter)
                 except StopIteration:
-                    # Reset dataloader
                     data_iter = iter(dataloader)
                     batch = next(data_iter)
-                
+
                 if isinstance(batch, (list, tuple)) and len(batch) == 2:
                     conditioning_data, _ = batch
                 else:
                     conditioning_data = batch
-                
+
                 try:
-                    # Sample
                     final_sample, steps = sampler.sample_trajectory(conditioning_data)
-                    
-                    # Compute Reward
-                    # R(x_0) = Classifier(x_0, t=0).mu
+
                     t_zero = torch.zeros(final_sample.get_batch_size(), device=self.device)
                     with torch.no_grad():
-                         mu, _ = self.reward_model(final_sample, t_zero)
-                         # mu is [batch_size]
-                         rewards = mu
-                         
-                    
+                        mu, _ = self.reward_model(final_sample, t_zero)
+                        rewards = mu
+
                 except (IndexError, RuntimeError) as e:
                     print(f"Skipping batch due to error: {e}")
                     continue
-                
-                # Store
+
                 traj = Trajectory(
                     steps=steps,
                     final_sample=final_sample,
                     reward=rewards
                 )
                 trajectories.append(traj)
-                
+
             # 2. Update
             if len(trajectories) > 0:
                 loss = self.step(trajectories, sampler)
-                print(f"  Loss: {loss:.4f}")
+                all_rewards = torch.cat([t.reward for t in trajectories])
+                mean_reward = all_rewards.mean().item()
+                print(f"  Loss: {loss:.4f}  Mean reward: {mean_reward:.4f}")
+
+                if save_path is not None and (epoch + 1) % save_every == 0:
+                    self.save_checkpoint(save_path / "last.ckpt")
+
+                if save_path is not None and mean_reward > best_mean_reward:
+                    best_mean_reward = mean_reward
+                    self.save_checkpoint(save_path / "best_model.ckpt")
+                    print(f"  New best reward {best_mean_reward:.4f} — saved best_model.ckpt")
             else:
-                 print("  No trajectories collected. Skipping step.")
+                print("  No trajectories collected. Skipping step.")
 

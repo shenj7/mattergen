@@ -108,53 +108,74 @@ def main():
     if args.checkpoint:
         rl_ckpt_path = Path(args.checkpoint).resolve()
         print(f"Loading fine-tuned weights from {rl_ckpt_path}...")
-        
-        # DDPO trainer saves state dict in a dict under 'actor_state_dict' or 'state_dict'
-        # Or sometimes just the model state dict if user saved it that way.
-        # Let's inspect what train_ddpo.py saves. 
-        # It saves: {'epoch': ..., 'actor_state_dict': ..., ...}
-        
+
         checkpoint = torch.load(rl_ckpt_path, map_location=get_device())
-        
+
         if "actor_state_dict" in checkpoint:
             state_dict = checkpoint["actor_state_dict"]
         elif "state_dict" in checkpoint:
             state_dict = checkpoint["state_dict"]
         else:
-            state_dict = checkpoint # Assume it's the state dict itself
-            
-        # The actor wrapper might have prefixes.
-        # MatterGenActor wraps the denoiser. 
-        # If train_ddpo.py saved actor.state_dict(), and actor has self.denoiser...
-        # Wait, MatterGenActor inherits from nn.Module and has self.denoiser = denoiser.
-        # So keys will be "denoiser.xxx".
-        # But generator.model is the DiffusionLightningModule.
-        # generator.model.model IS the denoiser (GemNetTDenoiser).
-        
-        # We need to map "denoiser.xxx" -> "model.xxx" (if loading into PL module)
-        # OR "denoiser.xxx" -> "xxx" (if loading into denoiser directly).
-        
-        # generator.model is DiffusionLightningModule
-        # generator.model.model is GemNetTDenoiser
-        
-        # Let's clean the keys.
-        new_state_dict = {}
+            state_dict = checkpoint
+
+        # Strip the "denoiser." prefix that MatterGenActor adds, and ignore the
+        # "diffusion_module.*" subtree (duplicate of denoiser weights stored by
+        # MatterGenActor.__init__'s self.diffusion_module reference).
+        denoiser_sd = {}
         for k, v in state_dict.items():
             if k.startswith("denoiser."):
-                # Remove "denoiser." prefix to get raw GemNet keys
-                new_key = k[len("denoiser."):]
-                new_state_dict[new_key] = v
-            else:
-                new_state_dict[k] = v
-                
-        # Load into the DENOISER component of the Lightning Module
-        # generator.model -> DiffusionLightningModule
-        # .diffusion_module -> DiffusionModule
-        # .model -> GemNetTDenoiser
-        missing, unexpected = generator.model.diffusion_module.model.load_state_dict(new_state_dict, strict=False)
+                denoiser_sd[k[len("denoiser."):]] = v
+
+        if not denoiser_sd:
+            # Checkpoint has no "denoiser." prefix — assume it's already a raw denoiser dict.
+            denoiser_sd = {k: v for k, v in state_dict.items()
+                           if not k.startswith("diffusion_module.")}
+
+        # Detect whether this is a LoRA checkpoint (keys contain ".base_layer." or ".lora_A.").
+        # MatterGenActor wraps fc_atom / out_energy / out_forces with LoRALayer which renames
+        #   fc_atom.weight  ->  fc_atom.base_layer.weight  (+ fc_atom.lora_A/B.weight)
+        # The base model has no LoRALayer, so we merge the update back into the base weight:
+        #   W_merged = W_base + scaling * lora_B @ lora_A   (scaling = alpha / rank)
+        is_lora = any(".base_layer." in k for k in denoiser_sd)
+
+        if is_lora:
+            print("Detected LoRA checkpoint — merging LoRA weights into base weights...")
+            # Collect all LoRA root prefixes (e.g. "fc_atom", "out_energy.linear", …)
+            import re
+            lora_roots = set(
+                re.sub(r"\.(base_layer|lora_A|lora_B)\..*$", "", k)
+                for k in denoiser_sd if ".base_layer." in k or ".lora_A." in k
+            )
+            merged_sd = {}
+            for root in lora_roots:
+                W = denoiser_sd[f"{root}.base_layer.weight"]
+                lora_A = denoiser_sd[f"{root}.lora_A.weight"]  # (rank, in)
+                lora_B = denoiser_sd[f"{root}.lora_B.weight"]  # (out, rank)
+                # Recover scaling from the rank dimension (alpha=rank=16 in MatterGenActor)
+                rank = lora_A.shape[0]
+                alpha = float(rank)  # MatterGenActor hardcodes alpha == rank == 16
+                scaling = alpha / rank
+                merged_sd[f"{root}.weight"] = W + scaling * (lora_B @ lora_A)
+                # Copy bias if present
+                bias_key = f"{root}.base_layer.bias"
+                if bias_key in denoiser_sd:
+                    merged_sd[f"{root}.bias"] = denoiser_sd[bias_key]
+            # Add all non-LoRA keys (everything that isn't base_layer / lora_A / lora_B)
+            for k, v in denoiser_sd.items():
+                if not any(tag in k for tag in (".base_layer.", ".lora_A.", ".lora_B.")):
+                    merged_sd[k] = v
+            denoiser_sd = merged_sd
+            print(f"Merged {len(lora_roots)} LoRA layers.")
+
+        denoiser = generator.model.diffusion_module.model
+        missing, unexpected = denoiser.load_state_dict(denoiser_sd, strict=False)
         print(f"Weights loaded. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
-        if len(unexpected) > 0:
-            print(f"Unexpected keys sample: {unexpected[:5]}")
+        if missing:
+            print(f"  Missing keys sample: {missing[:5]}")
+        if unexpected:
+            print(f"  Unexpected keys sample: {unexpected[:5]}")
+        if missing or unexpected:
+            print("  WARNING: key mismatches above mean some weights weren't loaded — check checkpoint source.")
 
     # Generate structures
     structures = generator.generate(output_dir=str(output_path))

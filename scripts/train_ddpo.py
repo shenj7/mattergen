@@ -61,6 +61,7 @@ def main():
     parser.add_argument("--critic_lr", type=float, default=1e-4)
     parser.add_argument("--num_inference_steps", type=int, default=20, help="Number of diffusion steps (N) for sampling")
     parser.add_argument("--train_epochs", type=int, default=10, help="Number of outer training loops")
+    parser.add_argument("--save_every", type=int, default=1, help="Save checkpoint every N epochs")
     
     args = parser.parse_args()
     
@@ -191,21 +192,34 @@ def main():
     datamodule.setup(stage="fit")
     train_dataloader = datamodule.train_dataloader()
     
+    # 7. Prepare output directory with config.yaml so mattergen-generate can load checkpoints.
+    # load_from_checkpoint_and_config expects {"state_dict": ...} + config.yaml alongside.
+    import shutil
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    base_ckpt_dir = Path(args.diffusion_ckpt).resolve() if os.path.exists(args.diffusion_ckpt) else None
+    if base_ckpt_dir is not None:
+        src_config = base_ckpt_dir / "config.yaml"
+        dst_config = Path(args.output_dir) / "config.yaml"
+        if src_config.exists() and not dst_config.exists():
+            shutil.copy2(src_config, dst_config)
+
     print("Starting Training Loop...")
-    
-    # 7. Run Training
+
+    # 8. Run Training — intermediate checkpoints are saved to output_dir during training.
+    # Use --model_path=<output_dir> with mattergen-generate after training.
     trainer.train_loop(
         sampler=sampler,
         dataloader=train_dataloader,
-        num_epochs=args.train_epochs
+        num_epochs=args.train_epochs,
+        save_path=args.output_dir,
+        save_every=args.save_every,
     )
-    
-    # 8. Save Final Model
-    os.makedirs(args.output_dir, exist_ok=True)
-    save_path = os.path.join(args.output_dir, "final_ddpo.pt")
-    print(f"Saving model to {save_path}")
-    torch.save(diffusion_module.state_dict(), save_path)
-    print("Done!")
+
+    # Save final checkpoint (train_loop already saves last.ckpt each epoch, this is a safety copy).
+    final_path = os.path.join(args.output_dir, "last.ckpt")
+    torch.save({"state_dict": diffusion_module.state_dict()}, final_path)
+    print(f"Done! Generate with: mattergen-generate <output_dir> --model_path={args.output_dir} ...")
 
 if __name__ == "__main__":
     main()
