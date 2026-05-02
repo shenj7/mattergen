@@ -111,6 +111,12 @@ def main():
 
         checkpoint = torch.load(rl_ckpt_path, map_location=get_device())
 
+        # Unwrap {"state_dict": ddpo_ckpt} added by the conversion step — the inner dict
+        # is the real DDPO checkpoint containing actor_state_dict, epoch, etc.
+        inner = checkpoint.get("state_dict", checkpoint)
+        if isinstance(inner, dict) and "actor_state_dict" in inner:
+            checkpoint = inner
+
         if "actor_state_dict" in checkpoint:
             state_dict = checkpoint["actor_state_dict"]
         elif "state_dict" in checkpoint:
@@ -118,57 +124,38 @@ def main():
         else:
             state_dict = checkpoint
 
-        # Strip the "denoiser." prefix that MatterGenActor adds, and ignore the
-        # "diffusion_module.*" subtree (duplicate of denoiser weights stored by
-        # MatterGenActor.__init__'s self.diffusion_module reference).
-        denoiser_sd = {}
-        for k, v in state_dict.items():
-            if k.startswith("denoiser."):
-                denoiser_sd[k[len("denoiser."):]] = v
-
-        if not denoiser_sd:
-            # Checkpoint has no "denoiser." prefix — assume it's already a raw denoiser dict.
-            denoiser_sd = {k: v for k, v in state_dict.items()
-                           if not k.startswith("diffusion_module.")}
-
-        # Detect whether this is a LoRA checkpoint (keys contain ".base_layer." or ".lora_A.").
-        # MatterGenActor wraps fc_atom / out_energy / out_forces with LoRALayer which renames
-        #   fc_atom.weight  ->  fc_atom.base_layer.weight  (+ fc_atom.lora_A/B.weight)
-        # The base model has no LoRALayer, so we merge the update back into the base weight:
-        #   W_merged = W_base + scaling * lora_B @ lora_A   (scaling = alpha / rank)
-        is_lora = any(".base_layer." in k for k in denoiser_sd)
+        # Keys are "diffusion_module.model.gemnet.xxx" — same namespace as generator.model
+        # (DiffusionLightningModule), so load directly into generator.model, not the denoiser.
+        #
+        # LoRA layers appear as "xxx.linear.base_layer.weight" + lora_A/lora_B siblings.
+        # Merge them back: W_merged = W_base + (alpha/rank) * lora_B @ lora_A
+        # MatterGenActor hardcodes rank=16, alpha=16 so scaling=1.
+        is_lora = any(".base_layer." in k for k in state_dict)
 
         if is_lora:
             print("Detected LoRA checkpoint — merging LoRA weights into base weights...")
-            # Collect all LoRA root prefixes (e.g. "fc_atom", "out_energy.linear", …)
             import re
             lora_roots = set(
                 re.sub(r"\.(base_layer|lora_A|lora_B)\..*$", "", k)
-                for k in denoiser_sd if ".base_layer." in k or ".lora_A." in k
+                for k in state_dict if ".base_layer." in k
             )
-            merged_sd = {}
+            merged_sd = dict(state_dict)
             for root in lora_roots:
-                W = denoiser_sd[f"{root}.base_layer.weight"]
-                lora_A = denoiser_sd[f"{root}.lora_A.weight"]  # (rank, in)
-                lora_B = denoiser_sd[f"{root}.lora_B.weight"]  # (out, rank)
-                # Recover scaling from the rank dimension (alpha=rank=16 in MatterGenActor)
-                rank = lora_A.shape[0]
-                alpha = float(rank)  # MatterGenActor hardcodes alpha == rank == 16
-                scaling = alpha / rank
+                W      = state_dict[f"{root}.base_layer.weight"]
+                lora_A = state_dict[f"{root}.lora_A.weight"]   # (rank, in_features)
+                lora_B = state_dict[f"{root}.lora_B.weight"]   # (out_features, rank)
+                rank   = lora_A.shape[0]
+                scaling = 1.0  # alpha == rank == 16 in MatterGenActor
                 merged_sd[f"{root}.weight"] = W + scaling * (lora_B @ lora_A)
-                # Copy bias if present
+                for tag in ("base_layer.weight", "lora_A.weight", "lora_B.weight"):
+                    merged_sd.pop(f"{root}.{tag}", None)
                 bias_key = f"{root}.base_layer.bias"
-                if bias_key in denoiser_sd:
-                    merged_sd[f"{root}.bias"] = denoiser_sd[bias_key]
-            # Add all non-LoRA keys (everything that isn't base_layer / lora_A / lora_B)
-            for k, v in denoiser_sd.items():
-                if not any(tag in k for tag in (".base_layer.", ".lora_A.", ".lora_B.")):
-                    merged_sd[k] = v
-            denoiser_sd = merged_sd
+                if bias_key in merged_sd:
+                    merged_sd[f"{root}.bias"] = merged_sd.pop(bias_key)
+            state_dict = merged_sd
             print(f"Merged {len(lora_roots)} LoRA layers.")
 
-        denoiser = generator.model.diffusion_module.model
-        missing, unexpected = denoiser.load_state_dict(denoiser_sd, strict=False)
+        missing, unexpected = generator.model.load_state_dict(state_dict, strict=False)
         print(f"Weights loaded. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
         if missing:
             print(f"  Missing keys sample: {missing[:5]}")
