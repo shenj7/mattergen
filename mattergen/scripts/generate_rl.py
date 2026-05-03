@@ -155,14 +155,19 @@ def main():
             state_dict = merged_sd
             print(f"Merged {len(lora_roots)} LoRA layers.")
 
+        # Drop the duplicate "denoiser.*" subtree — MatterGenActor stores self.denoiser and
+        # self.diffusion_module pointing to the same module, producing duplicate keys.
+        # The "diffusion_module.*" keys already cover everything we need.
+        state_dict = {k: v for k, v in state_dict.items() if not k.startswith("denoiser.")}
+
         missing, unexpected = generator.model.load_state_dict(state_dict, strict=False)
         print(f"Weights loaded. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
         if missing:
             print(f"  Missing keys sample: {missing[:5]}")
+            print("  WARNING: missing keys mean some weights weren't loaded — check checkpoint source.")
         if unexpected:
             print(f"  Unexpected keys sample: {unexpected[:5]}")
-        if missing or unexpected:
-            print("  WARNING: key mismatches above mean some weights weren't loaded — check checkpoint source.")
+            print("  WARNING: unexpected keys were ignored.")
 
     # Generate structures
     structures = generator.generate(output_dir=str(output_path))
