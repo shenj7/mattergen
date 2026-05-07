@@ -230,10 +230,10 @@ def main():
     noise_steps_list = sorted(last_seed_results.keys())
     total_steps = 1000
     n_plots = len(noise_steps_list)
-    ncols = 2
+    ncols = 3
     nrows = (n_plots + ncols - 1) // ncols
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(12, 6 * nrows))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(18, 6 * nrows))
     axes = axes.flatten() if n_plots > 1 else [axes]
 
     for i, step in enumerate(noise_steps_list):
@@ -247,10 +247,10 @@ def main():
         ax.scatter(trues, preds, alpha=0.6)
         lims = [min(trues.min(), preds.min()), max(trues.max(), preds.max())]
         ax.plot(lims, lims, "k--", alpha=0.5)
-        ax.set_title(f"Noise Step {step} (t={step/total_steps:.3f})\nMAE={mae:.2f}, RMSE={rmse:.2f}", fontsize=14)
-        ax.set_xlabel("DFT Bulk Modulus", fontsize=12)
-        ax.set_ylabel("Predicted Bulk Modulus", fontsize=12)
-        ax.tick_params(axis="both", which="major", labelsize=10)
+        ax.set_title(f"Noise Step {step} (t={step/total_steps:.3f})\nMAE={mae:.2f}, RMSE={rmse:.2f}", fontsize=17)
+        ax.set_xlabel("DFT Bulk Modulus", fontsize=14)
+        ax.set_ylabel("Predicted Bulk Modulus", fontsize=14)
+        ax.tick_params(axis="both", which="major", labelsize=12)
 
     for i in range(n_plots, len(axes)):
         axes[i].axis("off")
