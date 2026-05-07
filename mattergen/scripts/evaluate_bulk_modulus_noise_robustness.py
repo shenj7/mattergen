@@ -247,10 +247,10 @@ def main():
         ax.scatter(trues, preds, alpha=0.6)
         lims = [min(trues.min(), preds.min()), max(trues.max(), preds.max())]
         ax.plot(lims, lims, "k--", alpha=0.5)
-        ax.set_title(f"Noise Step {step} (t={step/total_steps:.3f})\nMAE={mae:.2f}, RMSE={rmse:.2f}", fontsize=17)
-        ax.set_xlabel("DFT Bulk Modulus", fontsize=14)
-        ax.set_ylabel("Predicted Bulk Modulus", fontsize=14)
-        ax.tick_params(axis="both", which="major", labelsize=12)
+        ax.set_title(f"Noise Step {step} (t={step/total_steps:.3f})\nMAE={mae:.2f}, RMSE={rmse:.2f}", fontsize=21)
+        ax.set_xlabel("DFT Bulk Modulus", fontsize=18)
+        ax.set_ylabel("Predicted Bulk Modulus", fontsize=18)
+        ax.tick_params(axis="both", which="major", labelsize=15)
 
     for i in range(n_plots, len(axes)):
         axes[i].axis("off")
